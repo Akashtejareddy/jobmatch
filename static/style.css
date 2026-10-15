@@ -55,4 +55,11 @@ a { color: #1c6350; }
 .ai-output textarea { width: 100%; resize: vertical; font-weight: 400; line-height: 1.5; }
 .ai-output li { margin-bottom: 8px; }
 .ai-text { white-space: pre-wrap; line-height: 1.6; }
+.secondary { background: #fff; color: #21634e; }
+.secondary:hover { background: #e6f3e9; }
+#query-choices { border: 1px solid #dce5df; border-radius: 8px; padding: 16px; margin: 16px 0; }
+.query-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; }
+.query-option { flex-direction: row; align-items: center; gap: 8px; font-weight: 400; overflow-wrap: anywhere; }
+.query-option input { flex-shrink: 0; margin: 0; accent-color: #21634e; }
+.also-on { margin: 6px 0 0; }
 @media (max-width: 600px) { .container { padding: 16px; } section { padding: 16px; } form > label { width: 100%; } }

@@ -3,6 +3,8 @@ let jobs = [];
 let currentStatus = 'saved';
 let aiEnabled = false;
 let aiEnableMessage = 'Add OPENAI_API_KEY to .env to enable';
+let discoveryProfileVersion = null;
+let discoveryBusy = false;
 const statuses = ['saved', 'applied', 'interview', 'offer', 'rejected'];
 const transitions = { saved: ['applied'], applied: ['interview', 'rejected'], interview: ['offer', 'rejected'], offer: [], rejected: [] };
 
@@ -75,6 +77,24 @@ async function loadJobs() {
   aiEnableMessage = result.ai_message;
   renderJobs();
   renderTracker();
+}
+function rememberLocation() {
+  const location = $('#location').value.trim() || 'USA';
+  $('#location').value = location;
+  try { localStorage.setItem('jobmatch.location', location); } catch (_) { /* Storage can be disabled. */ }
+  return location;
+}
+function sourceSummary(sources) {
+  return sources.map((source) => `${source.site}: ${source.added} new, ${source.updated} refreshed, ${source.skipped} skipped.${source.warning ? ` ${source.warning}` : ''}`).join('\n');
+}
+function updateDiscoveryControls() {
+  for (const selector of ['#discover-jobs', '#refresh-jobs', '#location', '#search-term']) $(selector).disabled = discoveryBusy;
+  for (const checkbox of document.querySelectorAll('#query-options input')) checkbox.disabled = discoveryBusy;
+  $('#run-discovery').disabled = discoveryBusy || !document.querySelector('#query-options input:checked');
+}
+function alsoOn(job) {
+  const names = [...new Set(job.also_on.map((entry) => entry.source))];
+  return names.length ? element('p', `also on ${names.join(', ')}`, 'muted also-on') : null;
 }
 function scoreBadge(job) {
   return element('span', job.match_score === null ? 'Unscored' : `${job.match_score.toFixed(1)}%`,
@@ -223,9 +243,13 @@ function renderJobs() {
     const score = element('td');
     score.append(scoreBadge(job));
     row.append(title, score);
-    for (const value of [job.company, job.location, `${job.source} / ${job.portal}`, job.status]) {
+    for (const value of [job.company, job.location]) {
       row.append(element('td', value));
     }
+    const source = element('td', `${job.source} / ${job.portal}`);
+    const hint = alsoOn(job);
+    if (hint) source.append(hint);
+    row.append(source, element('td', job.status));
     const cell = element('td');
     cell.append(applyLink(job.job_url));
     row.append(cell);
@@ -263,6 +287,8 @@ function renderTracker() {
     card.append(element('h3', job.title), element('p', job.company));
     card.append(scoreBadge(job), skillChips(job));
     card.append(element('p', `${job.portal} · ${job.location || 'Location not listed'}`, 'muted'));
+    const hint = alsoOn(job);
+    if (hint) card.append(hint);
     card.append(element('p', job.days_since_applied === null ? 'Not applied yet' : `${job.days_since_applied} days since applied`, 'muted'));
     card.append(applyLink(job.job_url));
     const notesForm = element('form', undefined, 'notes-form');
@@ -301,6 +327,9 @@ $('#resume-form').addEventListener('submit', async (event) => {
     body.append('file', $('#resume-file').files[0]);
     const result = await api('/upload', { method: 'POST', body });
     renderProfile(result.profile);
+    $('#discovery-plan').hidden = true;
+    discoveryProfileVersion = null;
+    message('#discovery-message', '');
     message('#resume-message', result.warning || 'Resume parsed and saved.');
     await loadJobs();
   } catch (error) { message('#resume-message', error.message, true); }
@@ -308,19 +337,79 @@ $('#resume-form').addEventListener('submit', async (event) => {
 });
 $('#search-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const button = event.currentTarget.querySelector('button');
-  button.disabled = true;
+  discoveryBusy = true;
+  updateDiscoveryControls();
+  rememberLocation();
+  message('#search-message', 'Generating job-search queries from your resume…');
+  message('#discovery-message', '');
+  $('#discovery-plan').hidden = true;
+  try {
+    const result = await api('/discovery/queries', jsonRequest('POST', { role_override: $('#search-term').value }));
+    discoveryProfileVersion = result.profile_uploaded_at;
+    $('#detected-title').textContent = result.detected_titles.length
+      ? `Detected title${result.detected_titles.length > 1 ? 's' : ''}: ${result.detected_titles.join(', ')} (${result.title_source}).`
+      : 'No recent title detected. Queries use your skills; enter a role override to target a title.';
+    $('#discovery-skills').textContent = `Resume skills: ${result.skills.join(', ') || 'None detected'}. Query builder: ${result.method}.`;
+    const options = $('#query-options');
+    options.replaceChildren();
+    for (const query of result.queries) {
+      const label = element('label', undefined, 'query-option');
+      const checkbox = element('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = query;
+      checkbox.checked = true;
+      checkbox.addEventListener('change', updateDiscoveryControls);
+      label.append(checkbox, element('span', query));
+      options.append(label);
+    }
+    $('#discovery-plan').hidden = false;
+    message('#search-message', `${result.queries.length} queries generated. Uncheck any you do not want, then Run discovery.${result.warning ? ` ${result.warning}` : ''}`);
+  } catch (error) { message('#search-message', error.message, true); }
+  finally { discoveryBusy = false; updateDiscoveryControls(); }
+});
+$('#run-discovery').addEventListener('click', async () => {
+  const queries = [...document.querySelectorAll('#query-options input:checked')].map((input) => input.value);
+  if (!queries.length || !discoveryProfileVersion) return;
+  const version = discoveryProfileVersion;
+  const location = rememberLocation();
+  discoveryBusy = true;
+  updateDiscoveryControls();
+  const lines = [];
+  let totalNew = 0;
+  try {
+    for (const [index, query] of queries.entries()) {
+      message('#discovery-message', [`Running ${index + 1}/${queries.length}: ${query} — ${location}`, ...lines].join('\n'));
+      const result = await api('/discovery/run', jsonRequest('POST', {
+        queries: [query], location, profile_uploaded_at: version,
+      }));
+      totalNew += result.new_jobs;
+      for (const entry of result.queries) {
+        lines.push(`${entry.query}: ${entry.jobs_found} unique jobs found.\n${sourceSummary(entry.sources)}`);
+      }
+      lines.push(`Auto-scored ${result.scoring.scored} new jobs.${result.warning ? ` ${result.warning}` : ''}`);
+      await loadJobs();
+    }
+    message('#discovery-message', [`Discovery complete: ${queries.length} queries, ${totalNew} new jobs saved.`, ...lines].join('\n'));
+  } catch (error) { message('#discovery-message', [...lines, error.message].join('\n'), true); }
+  finally { discoveryBusy = false; updateDiscoveryControls(); }
+});
+$('#refresh-jobs').addEventListener('click', async () => {
+  const role = $('#search-term').value.trim();
+  if (!role) {
+    message('#search-message', 'Enter a role override for manual Refresh jobs, or use Discover jobs for me.');
+    return;
+  }
+  discoveryBusy = true;
+  updateDiscoveryControls();
   message('#search-message', 'Fetching Indeed, LinkedIn, and Glassdoor. Please wait…');
   try {
     const result = await api('/refresh-jobs', jsonRequest('POST', {
-      search_term: $('#search-term').value, location: $('#location').value,
+      search_term: role, location: rememberLocation(),
     }));
-    message('#search-message', result.sources.map((source) =>
-      `${source.site}: ${source.added} new, ${source.updated} refreshed, ${source.skipped} skipped.${source.warning ? ` ${source.warning}` : ''}`
-    ).join('\n'));
+    message('#search-message', sourceSummary(result.sources));
     await loadJobs();
   } catch (error) { message('#search-message', error.message, true); }
-  finally { button.disabled = false; }
+  finally { discoveryBusy = false; updateDiscoveryControls(); }
 });
 $('#add-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -347,6 +436,8 @@ $('#score-jobs').addEventListener('click', async (event) => {
   finally { button.disabled = false; }
 });
 async function initialize() {
+  try { $('#location').value = localStorage.getItem('jobmatch.location') || 'USA'; } catch (_) { /* Use USA by default. */ }
+  $('#location').addEventListener('change', rememberLocation);
   try { renderProfile((await api('/profile')).profile); }
   catch (error) { message('#resume-message', error.message, true); }
   try { await loadJobs(); }

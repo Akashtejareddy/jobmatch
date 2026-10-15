@@ -15,10 +15,12 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pypdf import PdfReader
 
 import matching
+import discovery
+import deduplication
 from fit_kit import ENABLE_MESSAGE, generate_fit_kit
 
 ROOT = Path(__file__).resolve().parent
@@ -98,10 +100,18 @@ def init_db():
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (job_id, kind)
             );
+            CREATE TABLE IF NOT EXISTS search_queries (
+                id INTEGER PRIMARY KEY,
+                query TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                jobs_found INTEGER NOT NULL DEFAULT 0
+            );
         """)
         # Additive migration also works on an existing v1 jobs.db.
         if "match_score" not in {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}:
             db.execute("ALTER TABLE jobs ADD COLUMN match_score REAL")
+        if "also_on" not in {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}:
+            db.execute("ALTER TABLE jobs ADD COLUMN also_on TEXT NOT NULL DEFAULT '[]'")
 
 
 @asynccontextmanager
@@ -253,10 +263,27 @@ def portal_for(url):
 def store_job(job):
     """Refresh listing metadata while preserving tracking state and history."""
     with database() as db:
+        db.execute("BEGIN IMMEDIATE")
         existing = db.execute(
             "SELECT * FROM jobs WHERE source = ? AND source_id_or_url = ?",
             (job["source"], job["source_id_or_url"]),
         ).fetchone()
+        if existing is None:
+            # Merged identities must resolve to their keeper before fuzzy matching.
+            alias = db.execute(
+                "SELECT jobs.* FROM jobs, json_each(jobs.also_on) AS alias "
+                "WHERE json_extract(alias.value, '$.source') = ? "
+                "AND json_extract(alias.value, '$.source_id_or_url') = ? LIMIT 1",
+                (job["source"], job["source_id_or_url"]),
+            ).fetchone()
+            if alias is None:
+                alias = next((row for row in db.execute("SELECT * FROM jobs ORDER BY id")
+                              if deduplication.same_posting(row, job)), None)
+            if alias is not None:
+                deduplication.add_alias(db, alias, job)
+                db.execute("UPDATE jobs SET fetched_at = ? WHERE id = ?", (job["fetched_at"], alias["id"]))
+                row = db.execute("SELECT * FROM jobs WHERE id = ?", (alias["id"],)).fetchone()
+                return dict(row), False
         columns = ("source", "source_id_or_url", "title", "company", "location",
                    "description", "job_url", "portal", "posted_at", "fetched_at")
         values = [job.get(column) for column in columns]
@@ -351,6 +378,12 @@ def add_job(request: AddJob):
         "posted_at": str(posting["datePosted"]) if posting.get("datePosted") else None,
         "fetched_at": now(),
     })
+    with database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        redirects = deduplication.merge_existing(db, now())
+        keeper_id = redirects.get(row["id"], row["id"])
+        created = created and keeper_id == row["id"]
+        row = dict(db.execute("SELECT * FROM jobs WHERE id = ?", (keeper_id,)).fetchone())
     return {"job": row, "created": created,
             "warning": "Company was not present in page metadata." if not company else None}
 
@@ -366,17 +399,18 @@ def clean(value, default=""):
     return str(value)
 
 
-@app.post("/refresh-jobs")
-def refresh_jobs(request: Search):
+def ingest_jobs(search_term, location):
     # Separate requests let working sites complete when another site fails.
     from jobspy import scrape_jobs
 
     results = []
+    found_ids = set()
+    new_ids = set()
     for site in ("indeed", "linkedin", "glassdoor"):
         added = updated = skipped = 0
         try:
-            frame = scrape_jobs(site_name=[site], search_term=request.search_term,
-                                location=request.location, results_wanted=50, hours_old=72,
+            frame = scrape_jobs(site_name=[site], search_term=search_term,
+                                location=location, results_wanted=50, hours_old=72,
                                 country_indeed="USA")
             for record in frame.to_dict(orient="records"):
                 try:
@@ -385,7 +419,7 @@ def refresh_jobs(request: Search):
                     if not identity or not valid_url(url):
                         skipped += 1
                         continue
-                    _, created = store_job({
+                    row, created = store_job({
                         "source": site, "source_id_or_url": identity,
                         "title": clean(record.get("title"), "Untitled job"),
                         "company": clean(record.get("company"), "Unknown company"),
@@ -394,6 +428,9 @@ def refresh_jobs(request: Search):
                         "portal": portal_for(clean(record.get("job_url_direct")) or url),
                         "posted_at": clean(record.get("date_posted"), None), "fetched_at": now(),
                     })
+                    found_ids.add(row["id"])
+                    if created:
+                        new_ids.add(row["id"])
                     added += int(created)
                     updated += int(not created)
                 except Exception:
@@ -406,7 +443,98 @@ def refresh_jobs(request: Search):
             logger.exception("Job scrape failed for %s; continuing with other sources", site)
             results.append({"site": site, "added": added, "updated": updated, "skipped": skipped,
                             "warning": "Scrape failed; this site may be blocking requests. Other sites were still attempted."})
-    return {"sources": results}
+    with database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        redirects = deduplication.merge_existing(db, now())
+    return {"sources": results,
+            "job_ids": sorted({redirects.get(identity, identity) for identity in found_ids}),
+            "new_job_ids": sorted({redirects.get(identity, identity) for identity in new_ids}),
+            "merged": len(redirects)}
+
+
+@app.post("/refresh-jobs")
+def refresh_jobs(request: Search):
+    return ingest_jobs(request.search_term, request.location)
+
+
+class DiscoveryPlan(BaseModel):
+    role_override: str = Field(default="", max_length=200)
+
+
+@app.post("/discovery/queries")
+def build_discovery_queries(request: DiscoveryPlan):
+    profile = get_profile()["profile"]
+    if not profile or not matching.profile_text(profile).strip():
+        raise HTTPException(400, "Upload a readable resume before discovering jobs, or use manual Refresh jobs.")
+    titles, title_source = discovery.detect_titles(profile)
+    skills = matching.profile_skills(profile)[:15]
+    override = request.role_override.strip()
+    local_titles = [override] if override else titles
+    queries, warning = discovery.local_queries(profile, local_titles, skills)
+    method = "role override" if override else "local"
+    key = read_api_key()
+    if key and not override:
+        try:
+            queries = discovery.ai_queries(profile, titles, skills, key)
+            method = "OpenAI"
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
+            logger.warning("AI discovery query generation failed; using local queries")
+            warning = "AI query generation failed. Using local resume-based queries instead."
+    if not queries:
+        raise HTTPException(400, "No recent title or technical skills detected. Enter a role override and try again.")
+    return {"queries": queries, "detected_titles": titles, "title_source": title_source,
+            "skills": skills, "method": method, "warning": warning,
+            "profile_uploaded_at": profile["uploaded_at"]}
+
+
+class DiscoveryRun(BaseModel):
+    queries: list[str] = Field(min_length=1, max_length=12)
+    location: str = Field(default="USA", min_length=1, max_length=200)
+    profile_uploaded_at: str | None = None
+
+    @field_validator("queries")
+    @classmethod
+    def validate_queries(cls, values):
+        if any(not query.strip() or len(query) > 200 for query in values):
+            raise ValueError("Queries must contain 1-200 characters")
+        return discovery.unique_queries(values)
+
+    @field_validator("location")
+    @classmethod
+    def validate_location(cls, value):
+        if not value.strip():
+            raise ValueError("Location is required")
+        return value.strip()
+
+
+@app.post("/discovery/run")
+def run_discovery(request: DiscoveryRun):
+    profile = get_profile()["profile"]
+    if not profile or not matching.profile_text(profile).strip():
+        raise HTTPException(400, "Upload a readable resume before running discovery.")
+    if request.profile_uploaded_at and request.profile_uploaded_at != profile["uploaded_at"]:
+        raise HTTPException(409, "Resume changed. Generate a new set of discovery queries.")
+    results = []
+    new_ids = set()
+    for query in request.queries:
+        with database() as db:
+            cursor = db.execute("INSERT INTO search_queries (query, created_at) VALUES (?, ?)", (query, now()))
+            query_id = cursor.lastrowid
+        result = ingest_jobs(query, request.location)
+        count = len(result["job_ids"])
+        with database() as db:
+            db.execute("UPDATE search_queries SET jobs_found = ? WHERE id = ?", (count, query_id))
+        new_ids.update(result["new_job_ids"])
+        results.append({"query": query, "jobs_found": count, "sources": result["sources"]})
+    scoring = {"scored": 0, "embedded": 0, "cached": 0}
+    warning = None
+    if new_ids:
+        try:
+            # Discovery scores its new jobs; existing jobs keep their scores/state.
+            scoring = score_matching_jobs(sorted(new_ids), profile["uploaded_at"])
+        except HTTPException as error:
+            warning = f"Jobs were saved, but automatic scoring did not finish: {error.detail} Use Score all jobs to retry."
+    return {"queries": results, "new_jobs": len(new_ids), "scoring": scoring, "warning": warning}
 
 
 @app.get("/jobs")
@@ -424,6 +552,7 @@ def get_jobs():
     jobs = []
     for row in rows:
         job = dict(row)
+        job["also_on"] = json.loads(row["also_on"])
         job["days_since_applied"] = (
             (datetime.now(timezone.utc) - datetime.fromisoformat(row["applied_at"])).days
             if row["applied_at"] else None
@@ -434,8 +563,9 @@ def get_jobs():
     return {"jobs": jobs, "ai_enabled": bool(read_api_key()), "ai_message": ENABLE_MESSAGE}
 
 
-@app.post("/score-jobs")
-def score_jobs():
+def score_matching_jobs(job_ids=None, profile_uploaded_at=None):
+    if job_ids is not None and not job_ids:
+        return {"scored": 0, "embedded": 0, "cached": 0}
     # Only one model load/scoring run at a time, without blocking other features.
     if not matching.SCORING_LOCK.acquire(blocking=False):
         raise HTTPException(409, "Scoring is already running. Please wait.")
@@ -443,10 +573,13 @@ def score_jobs():
         profile = get_profile()["profile"]
         if not profile or not matching.profile_text(profile).strip():
             raise HTTPException(400, "Upload a resume with readable text before scoring jobs.")
+        if profile_uploaded_at and profile_uploaded_at != profile["uploaded_at"]:
+            raise HTTPException(409, "Resume changed during discovery. Score again using your current resume.")
         with database() as db:
+            where = " WHERE jobs.id IN (" + ",".join("?" for _ in job_ids) + ")" if job_ids else ""
             jobs = [dict(row) for row in db.execute(
                 "SELECT jobs.*, job_embeddings.embedding, job_embeddings.model "
-                "FROM jobs LEFT JOIN job_embeddings ON jobs.id = job_embeddings.job_id"
+                "FROM jobs LEFT JOIN job_embeddings ON jobs.id = job_embeddings.job_id" + where, job_ids or [],
             )]
         if not jobs:
             return {"scored": 0, "embedded": 0, "cached": 0}
@@ -490,6 +623,11 @@ def score_jobs():
         return {"scored": len(jobs), "embedded": len(pending), "cached": len(jobs) - len(pending)}
     finally:
         matching.SCORING_LOCK.release()
+
+
+@app.post("/score-jobs")
+def score_jobs():
+    return score_matching_jobs()
 
 
 AiKind = Literal["fit_report", "tailor_bullets", "cover_letter"]

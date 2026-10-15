@@ -1,0 +1,9 @@
+{
+  "data analyst": ["data analyst", "senior data analyst", "healthcare data analyst", "RWD analyst", "RWE analyst", "real world evidence analyst", "HEOR analyst"],
+  "data scientist": ["data scientist", "senior data scientist", "applied scientist", "machine learning scientist"],
+  "data engineer": ["data engineer", "senior data engineer", "analytics engineer", "ETL engineer"],
+  "software engineer": ["software engineer", "senior software engineer", "software developer", "backend engineer"],
+  "business analyst": ["business analyst", "senior business analyst", "business intelligence analyst", "business systems analyst"],
+  "project manager": ["project manager", "senior project manager", "technical project manager", "program manager"],
+  "consultant": ["consultant", "senior consultant", "analytics consultant", "technical consultant"]
+}

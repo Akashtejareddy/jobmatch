@@ -22,12 +22,20 @@
     <section aria-labelledby="search-title">
       <h2 id="search-title">2. Find jobs</h2>
       <form id="search-form">
-        <label>Role <input id="search-term" value="data analyst" maxlength="200" required></label>
+        <label>Role override (optional) <input id="search-term" placeholder="Use titles and skills from my resume" maxlength="200"></label>
         <label>Location <input id="location" value="USA" maxlength="200" required></label>
-        <button type="submit">Refresh jobs</button>
+        <button id="discover-jobs" type="submit">Discover jobs for me</button>
+        <button id="refresh-jobs" class="secondary" type="button">Refresh jobs</button>
       </form>
-      <p class="muted">Fetches up to 50 jobs per source from the last 72 hours. This can take a few minutes.</p>
+      <p class="muted">Generate queries from your resume, review them, then run discovery. Each query fetches up to 50 jobs per source from the last 72 hours. Use a role override with Refresh jobs for manual search.</p>
       <p id="search-message" class="message" role="status"></p>
+      <div id="discovery-plan" hidden>
+        <p id="detected-title"></p>
+        <p id="discovery-skills" class="muted"></p>
+        <fieldset id="query-choices"><legend>Queries to run</legend><div id="query-options" class="query-options"></div></fieldset>
+        <button id="run-discovery" type="button">Run discovery</button>
+      </div>
+      <p id="discovery-message" class="message" role="status"></p>
       <form id="add-form">
         <label class="grow">Add job by URL <input id="job-url" type="url" placeholder="https://company.com/careers/job" required></label>
         <button type="submit">Add job</button>

@@ -34,8 +34,10 @@ resume/job data sent when you explicitly enable OpenAI tools below.
 1. **Resume:** select a PDF (up to 10 MB) and click **Parse**. Text is extracted
    with pypdf. Re-uploading replaces the single profile. Scanned PDFs require a
    text layer; there is no OCR.
-2. **Find jobs:** enter a role and location (defaults: `data analyst`, `USA`),
-   then **Refresh jobs**. JobSpy queries Indeed, LinkedIn, and Glassdoor
+2. **Find jobs:** use **Discover jobs for me** to build queries from your resume
+   (see below). For manual search, enter a **Role override** and click
+   **Refresh jobs**. Location defaults to `USA`; the browser remembers your last
+   location and you can override it before a search. JobSpy queries Indeed, LinkedIn, and Glassdoor
    separately, requesting 50 results per source from the past 72 hours.
    Results show per-site counts and warnings. Blocks, empty results, and
    failures on one site do not discard results from working sites. Some sites
@@ -80,6 +82,41 @@ resume/job data sent when you explicitly enable OpenAI tools below.
    to retain your draft, and **Copy** to copy the current text. Generation uses
    parsed profile JSON, or the stored raw resume text if no parsed profile exists.
    Re-uploading the resume or changing relevant job details clears stale outputs.
+6. **Automatic discovery:** **Discover jobs for me** shows the detected most
+   recent title(s), up to 15 resume skills, and generated query checkboxes.
+   It does not scrape yet. Uncheck any queries, then click **Run discovery**.
+   Queries run one at a time with progress, per-site counts/warnings, and the
+   existing last-72-hours/50-results-per-source settings. New jobs are scored
+   automatically on CPU; existing jobs retain their scores and tracking state.
+   If scoring cannot load the model, jobs and search history are still saved;
+   use **Score all jobs** after resolving model access.
+   Without a key, queries come from `profile.roles[0].title`, or best-effort
+   detection of title-like lines near date ranges in raw resume text. Recent
+   date ranges are preferred; detection is shown so you can correct it with
+   the role override. Detected titles expand using **`title_synonyms.json`**,
+   an editable JSON object mapping a lowercase title to a list of related
+   search titles. Changes take effect on the next query generation. Queries
+   combine these titles with skill pairs/domain keywords and are capped at 12.
+   With a `.env` key, `gpt-4o-mini` generates exactly 10 queries from the profile
+   instead. A role override explicitly uses the local title map/skill builder;
+   failed AI query generation also falls back locally with a warning.
+   Each executed query is stored in `search_queries` with `created_at` and
+   `jobs_found` (unique postings returned, including already saved jobs).
+   Unchecked queries are not executed or recorded. No scheduler is added.
+7. **Cross-source deduplication:** ingestion merges matching postings from
+   different sources into one row and displays hints such as **also on glassdoor**.
+   Company names are normalized to lowercase with punctuation and company
+   suffixes such as LLC/Inc removed. Titles match when shared tokens divided
+   by their average token count is at least 80% (Sørensen–Dice overlap).
+   For example, `Data Analyst` / `Senior Data Analyst` share 2 of an average
+   2.5 tokens: 80%. Different source IDs from the same source remain separate,
+   and unknown company names are not fuzzy-matched.
+   The earliest ingested job ID is kept. `also_on` retains the other sources,
+   URLs, and source IDs, so later refreshes do not recreate duplicates. Older
+   duplicate rows are consolidated on the next ingestion; tracker notes,
+   events, and application dates are combined, keeping the furthest recorded
+   status. Existing AI outputs are retained; conflicting alternate drafts are
+   preserved in the merge event. The keeper's embedding/score remain intact.
 
 ## Optional OpenAI tools
 
@@ -96,6 +133,9 @@ Fit-kit generation also uses `gpt-4o-mini`, sending the profile and selected job
 to OpenAI only when you click a generation button. API failures show a message
 and retain any previous output. Editing/copying an existing letter stays local
 and does not require a key. Scoring never needs or uses this key.
+Discovery query generation sends the profile to OpenAI only when you click
+**Discover jobs for me** with a `.env` key and no role override. Local query
+building, title expansion, cross-source deduplication, and scoring need no key.
 
 No authentication, Docker, scheduler, or automatic applications are included.
 Keep the default loopback binding: this app stores personal information and
@@ -110,7 +150,8 @@ is intended for local use.
 The tests use isolated temporary SQLite databases and mock external sites,
 OpenAI, and the embedding model; they do not download models, scrape, or send
 your resume anywhere. They cover v1 behavior, migration, scoring/cache reuse,
-skill overlap, AI gating and regeneration, and saved letter edits. API documentation
+skill overlap, AI gating and regeneration, saved letter edits, query building,
+discovery ingestion/auto-scoring, and cross-source merges with preserved tracking data. API documentation
 is available at `/docs` while the server runs.
 
 In the Codex cloud environment, the initial live scrape was blocked by the
