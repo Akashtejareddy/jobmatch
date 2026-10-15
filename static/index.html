@@ -33,8 +33,11 @@
         <button type="submit">Add job</button>
       </form>
       <p id="add-message" class="message" role="status"></p>
+      <button id="score-jobs" type="button">Score all jobs</button>
+      <p class="muted">Local CPU matching, no API key needed. The model downloads once on first use.</p>
+      <p id="score-message" class="message" role="status"></p>
       <div class="table-wrap"><table>
-        <thead><tr><th>Role</th><th>Company</th><th>Location</th><th>Source / portal</th><th>Status</th><th>Apply</th><th>Update status</th></tr></thead>
+        <thead><tr><th>Role / skills</th><th>Match</th><th>Company</th><th>Location</th><th>Source / portal</th><th>Status</th><th>Apply</th><th>Update status</th><th>AI fit kit</th></tr></thead>
         <tbody id="job-rows"></tbody>
       </table></div>
     </section>

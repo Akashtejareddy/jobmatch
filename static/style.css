@@ -40,4 +40,19 @@ a { color: #1c6350; }
 .actions button { font-size: 13px; padding: 8px 10px; }
 .notes-form { display: block; margin-top: 16px; }
 .notes-form button { margin-top: 8px; background: white; color: #21634e; }
+.score { display: inline-block; padding: 5px 9px; border-radius: 20px; background: #dceee1; color: #164d3b; font-weight: 700; white-space: nowrap; }
+.score.unscored { background: #eef1ef; color: #587068; font-weight: 400; }
+.job-title { min-width: 190px; }
+.skill-chips { margin-top: 8px; font-size: 12px; }
+.skill-group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 5px 0; }
+.chip { padding: 3px 7px; border-radius: 12px; background: #e6f3e9; }
+.missing .chip { background: #fff0dc; color: #7b4c12; }
+.skill-label { font-weight: 600; }
+.fit-kit { min-width: 210px; max-width: 440px; }
+.fit-kit[open] { width: 370px; }
+.fit-kit summary { cursor: pointer; color: #1c6350; font-weight: 600; }
+.ai-output { border-top: 1px solid #dce5df; margin-top: 16px; padding-top: 4px; }
+.ai-output textarea { width: 100%; resize: vertical; font-weight: 400; line-height: 1.5; }
+.ai-output li { margin-bottom: 8px; }
+.ai-text { white-space: pre-wrap; line-height: 1.6; }
 @media (max-width: 600px) { .container { padding: 16px; } section { padding: 16px; } form > label { width: 100%; } }

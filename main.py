@@ -18,6 +18,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pypdf import PdfReader
 
+import matching
+from fit_kit import ENABLE_MESSAGE, generate_fit_kit
+
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "jobs.db"
 logger = logging.getLogger("jobmatch")
@@ -83,7 +86,22 @@ def init_db():
                 changed_at TEXT NOT NULL,
                 note TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS job_embeddings (
+                job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+                embedding BLOB NOT NULL,
+                model TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS job_ai (
+                job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK (kind IN ('fit_report', 'tailor_bullets', 'cover_letter')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (job_id, kind)
+            );
         """)
+        # Additive migration also works on an existing v1 jobs.db.
+        if "match_score" not in {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}:
+            db.execute("ALTER TABLE jobs ADD COLUMN match_score REAL")
 
 
 @asynccontextmanager
@@ -213,6 +231,8 @@ def upload(file: UploadFile = File(...)):
             (text, json.dumps(parsed) if parsed is not None else None,
              file.filename or "resume.pdf", now()),
         )
+        db.execute("UPDATE jobs SET match_score = NULL")
+        db.execute("DELETE FROM job_ai")
     return {**get_profile(), "warning": warning}
 
 
@@ -234,7 +254,7 @@ def store_job(job):
     """Refresh listing metadata while preserving tracking state and history."""
     with database() as db:
         existing = db.execute(
-            "SELECT id FROM jobs WHERE source = ? AND source_id_or_url = ?",
+            "SELECT * FROM jobs WHERE source = ? AND source_id_or_url = ?",
             (job["source"], job["source_id_or_url"]),
         ).fetchone()
         columns = ("source", "source_id_or_url", "title", "company", "location",
@@ -247,6 +267,12 @@ def store_job(job):
         )
         row = db.execute("SELECT * FROM jobs WHERE source = ? AND source_id_or_url = ?",
                          (job["source"], job["source_id_or_url"])).fetchone()
+        if existing and any(existing[key] != row[key] for key in ("title", "description")):
+            db.execute("DELETE FROM job_embeddings WHERE job_id = ?", (row["id"],))
+            db.execute("UPDATE jobs SET match_score = NULL WHERE id = ?", (row["id"],))
+        if existing and any(existing[key] != row[key] for key in ("title", "description", "company", "location")):
+            db.execute("DELETE FROM job_ai WHERE job_id = ?", (row["id"],))
+        row = db.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
         if existing is None:
             db.execute("INSERT INTO job_events (job_id, old_status, new_status, changed_at, note) "
                        "VALUES (?, NULL, 'saved', ?, '')", (row["id"], job["fetched_at"]))
@@ -386,7 +412,15 @@ def refresh_jobs(request: Search):
 @app.get("/jobs")
 def get_jobs():
     with database() as db:
-        rows = db.execute("SELECT * FROM jobs ORDER BY fetched_at DESC, id DESC").fetchall()
+        rows = db.execute("SELECT * FROM jobs ORDER BY match_score DESC, fetched_at DESC, id DESC").fetchall()
+        ai_rows = db.execute("SELECT * FROM job_ai").fetchall()
+    profile = get_profile()["profile"]
+    skills = matching.profile_skills(profile) if profile else []
+    outputs = {}
+    for entry in ai_rows:
+        outputs.setdefault(entry["job_id"], {})[entry["kind"]] = {
+            "content": json.loads(entry["content"]), "created_at": entry["created_at"],
+        }
     jobs = []
     for row in rows:
         job = dict(row)
@@ -394,8 +428,118 @@ def get_jobs():
             (datetime.now(timezone.utc) - datetime.fromisoformat(row["applied_at"])).days
             if row["applied_at"] else None
         )
+        job["skill_overlap"] = matching.skill_overlap(skills, row["description"]) if profile else {"matched": [], "missing": []}
+        job["ai"] = outputs.get(row["id"], {})
         jobs.append(job)
-    return {"jobs": jobs}
+    return {"jobs": jobs, "ai_enabled": bool(read_api_key()), "ai_message": ENABLE_MESSAGE}
+
+
+@app.post("/score-jobs")
+def score_jobs():
+    # Only one model load/scoring run at a time, without blocking other features.
+    if not matching.SCORING_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "Scoring is already running. Please wait.")
+    try:
+        profile = get_profile()["profile"]
+        if not profile or not matching.profile_text(profile).strip():
+            raise HTTPException(400, "Upload a resume with readable text before scoring jobs.")
+        with database() as db:
+            jobs = [dict(row) for row in db.execute(
+                "SELECT jobs.*, job_embeddings.embedding, job_embeddings.model "
+                "FROM jobs LEFT JOIN job_embeddings ON jobs.id = job_embeddings.job_id"
+            )]
+        if not jobs:
+            return {"scored": 0, "embedded": 0, "cached": 0}
+        try:
+            model = matching.get_model()
+            resume_vector = matching.encode(model, [matching.profile_text(profile)])[0]
+            vectors = {}
+            pending = []
+            for job in jobs:
+                try:
+                    vector = matching.unpack_embedding(job["embedding"])
+                    if job["model"] != matching.MODEL_NAME or len(vector) != len(resume_vector):
+                        raise ValueError("Outdated embedding")
+                    vectors[job["id"]] = vector
+                except (ValueError, TypeError):
+                    pending.append(job)
+            if pending:
+                encoded = matching.encode(model, [f"{job['title']}\n{job['description']}" for job in pending])
+                vectors.update({job["id"]: vector for job, vector in zip(pending, encoded)})
+            scores = {job["id"]: matching.match_score(resume_vector, vectors[job["id"]]) for job in jobs}
+        except Exception:
+            logger.exception("Local match scoring failed")
+            raise HTTPException(503, "Local scoring could not load or run all-MiniLM-L6-v2. "
+                                "On first use, allow Hugging Face model downloads and try again. See server logs.")
+        with database() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT uploaded_at FROM profile WHERE id = 1").fetchone()
+            if not current or current["uploaded_at"] != profile["uploaded_at"]:
+                raise HTTPException(409, "Resume changed during scoring. Please score again.")
+            # Do not write results computed from a job that changed mid-request.
+            for job in jobs:
+                current_job = db.execute("SELECT title, description FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+                if not current_job or any(current_job[key] != job[key] for key in ("title", "description")):
+                    raise HTTPException(409, "Jobs changed during scoring. Please score again.")
+            for job in pending:
+                db.execute("INSERT INTO job_embeddings (job_id, embedding, model) VALUES (?, ?, ?) "
+                           "ON CONFLICT(job_id) DO UPDATE SET embedding = excluded.embedding, model = excluded.model",
+                           (job["id"], matching.pack_embedding(vectors[job["id"]]), matching.MODEL_NAME))
+            db.executemany("UPDATE jobs SET match_score = ? WHERE id = ?",
+                           [(score, job_id) for job_id, score in scores.items()])
+        return {"scored": len(jobs), "embedded": len(pending), "cached": len(jobs) - len(pending)}
+    finally:
+        matching.SCORING_LOCK.release()
+
+
+AiKind = Literal["fit_report", "tailor_bullets", "cover_letter"]
+
+
+@app.post("/jobs/{job_id}/ai/{kind}")
+def create_ai_output(job_id: int, kind: AiKind):
+    key = read_api_key()
+    if not key:
+        return {"enabled": False, "message": ENABLE_MESSAGE}
+    profile = get_profile()["profile"]
+    if not profile or not matching.profile_text(profile).strip():
+        raise HTTPException(400, "Upload a resume before generating a fit kit.")
+    with database() as db:
+        row = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "Job not found.")
+    job = dict(row)
+    try:
+        content = generate_fit_kit(kind, profile, job, key)
+    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
+        logger.warning("AI fit-kit generation failed for job %s (%s)", job_id, kind)
+        raise HTTPException(502, "AI generation failed. Check your .env key and API access, then try again. "
+                            "Any previously saved output has been kept.")
+    timestamp = now()
+    with database() as db:
+        db.execute("BEGIN IMMEDIATE")
+        current_profile = db.execute("SELECT uploaded_at FROM profile WHERE id = 1").fetchone()
+        current_job = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if (not current_profile or current_profile["uploaded_at"] != profile["uploaded_at"]
+                or not current_job or any(current_job[key] != job[key] for key in ("title", "company", "location", "description"))):
+            raise HTTPException(409, "Resume or job changed during generation. Please regenerate.")
+        db.execute("INSERT INTO job_ai (job_id, kind, content, created_at) VALUES (?, ?, ?, ?) "
+                   "ON CONFLICT(job_id, kind) DO UPDATE SET content = excluded.content, created_at = excluded.created_at",
+                   (job_id, kind, json.dumps(content), timestamp))
+    return {"enabled": True, "kind": kind, "content": content, "created_at": timestamp}
+
+
+class CoverLetterEdit(BaseModel):
+    content: str = Field(min_length=1, max_length=20000)
+
+
+@app.patch("/jobs/{job_id}/ai/cover_letter")
+def edit_cover_letter(job_id: int, request: CoverLetterEdit):
+    with database() as db:
+        result = db.execute("UPDATE job_ai SET content = ? WHERE job_id = ? AND kind = 'cover_letter'",
+                            (json.dumps(request.content), job_id))
+        if not result.rowcount:
+            raise HTTPException(404, "Generate a cover letter before editing it.")
+    return {"content": request.content}
 
 
 class UpdateJob(BaseModel):

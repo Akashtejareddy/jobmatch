@@ -1,6 +1,8 @@
 const $ = (selector) => document.querySelector(selector);
 let jobs = [];
 let currentStatus = 'saved';
+let aiEnabled = false;
+let aiEnableMessage = 'Add OPENAI_API_KEY to .env to enable';
 const statuses = ['saved', 'applied', 'interview', 'offer', 'rejected'];
 const transitions = { saved: ['applied'], applied: ['interview', 'rejected'], interview: ['offer', 'rejected'], offer: [], rejected: [] };
 
@@ -69,8 +71,129 @@ function renderProfile(profile) {
 async function loadJobs() {
   const result = await api('/jobs');
   jobs = result.jobs;
+  aiEnabled = result.ai_enabled;
+  aiEnableMessage = result.ai_message;
   renderJobs();
   renderTracker();
+}
+function scoreBadge(job) {
+  return element('span', job.match_score === null ? 'Unscored' : `${job.match_score.toFixed(1)}%`,
+    job.match_score === null ? 'score unscored' : 'score');
+}
+function skillChips(job) {
+  const container = element('div', undefined, 'skill-chips');
+  for (const [kind, skills] of Object.entries(job.skill_overlap)) {
+    if (!skills.length) continue;
+    const group = element('div', undefined, `skill-group ${kind}`);
+    group.append(element('span', `${kind}: `, 'skill-label'));
+    for (const skill of skills) group.append(element('span', skill, 'chip'));
+    container.append(group);
+  }
+  return container;
+}
+function renderAIOutputs(job, container, changedKind = null) {
+  const existingLetter = container.querySelector('[data-kind="cover_letter"]');
+  container.replaceChildren();
+  const labels = { fit_report: 'Fit report', tailor_bullets: 'Tailored bullets', cover_letter: 'Cover letter' };
+  for (const [kind, label] of Object.entries(labels)) {
+    const output = job.ai[kind];
+    if (!output) continue;
+    if (kind === 'cover_letter' && existingLetter && changedKind && changedKind !== 'cover_letter') {
+      // Generating another kit item must not discard an unsaved letter edit.
+      container.append(existingLetter);
+      continue;
+    }
+    const section = element('div', undefined, 'ai-output');
+    section.dataset.kind = kind;
+    section.append(element('h4', label));
+    if (kind === 'tailor_bullets') {
+      const list = element('ul');
+      output.content.forEach((bullet) => list.append(element('li', bullet)));
+      section.append(list);
+    } else if (kind === 'cover_letter') {
+      const draftLabel = element('label', `Cover letter draft for ${job.company}`);
+      const draft = element('textarea');
+      draft.value = output.content;
+      draft.maxLength = 20000;
+      draft.rows = 12;
+      draftLabel.append(draft);
+      section.append(draftLabel);
+      const actions = element('div', undefined, 'actions');
+      const save = element('button', 'Save edits');
+      const copy = element('button', 'Copy');
+      save.type = copy.type = 'button';
+      const status = element('p', undefined, 'message');
+      status.setAttribute('role', 'status');
+      save.addEventListener('click', async () => {
+        save.disabled = true;
+        status.textContent = '';
+        try {
+          const result = await api(`/jobs/${job.id}/ai/cover_letter`, jsonRequest('PATCH', { content: draft.value }));
+          output.content = result.content;
+          status.textContent = 'Edits saved.';
+          status.classList.remove('error');
+        } catch (error) { status.textContent = error.message; status.classList.add('error'); }
+        finally { save.disabled = false; }
+      });
+      copy.addEventListener('click', async () => {
+        try {
+          if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(draft.value);
+          else {
+            draft.focus();
+            draft.select();
+            if (!document.execCommand('copy')) throw new Error('Select the letter and copy it manually.');
+          }
+          status.textContent = 'Copied.';
+          status.classList.remove('error');
+        } catch (_) { status.textContent = 'Select the letter and copy it manually.'; status.classList.add('error'); }
+      });
+      actions.append(save, copy);
+      section.append(actions, status);
+    } else {
+      section.append(element('p', output.content, 'ai-text'));
+    }
+    container.append(section);
+  }
+}
+function fitKit(job) {
+  const details = element('details', undefined, 'fit-kit');
+  details.append(element('summary', 'AI fit kit'));
+  if (!aiEnabled) details.append(element('p', aiEnableMessage, 'muted'));
+  const actions = element('div', undefined, 'actions');
+  const status = element('p', undefined, 'message');
+  status.setAttribute('role', 'status');
+  const outputs = element('div');
+  const buttons = [];
+  for (const [kind, label] of Object.entries({ fit_report: 'Fit report', tailor_bullets: 'Tailor bullets', cover_letter: 'Cover letter' })) {
+    const button = element('button', job.ai[kind] ? `Regenerate ${label.toLowerCase()}` : label);
+    button.type = 'button';
+    button.disabled = !aiEnabled;
+    if (!aiEnabled) button.title = aiEnableMessage;
+    buttons.push(button);
+    button.addEventListener('click', async () => {
+      buttons.forEach((entry) => { entry.disabled = true; });
+      status.textContent = `Generating ${label.toLowerCase()}…`;
+      status.classList.remove('error');
+      try {
+        const result = await api(`/jobs/${job.id}/ai/${kind}`, { method: 'POST' });
+        if (!result.enabled) {
+          aiEnabled = false;
+          buttons.forEach((entry) => { entry.title = result.message; });
+          status.textContent = result.message;
+        } else {
+          job.ai[kind] = { content: result.content, created_at: result.created_at };
+          renderAIOutputs(job, outputs, kind);
+          button.textContent = `Regenerate ${label.toLowerCase()}`;
+          status.textContent = `${label} saved.`;
+        }
+      } catch (error) { status.textContent = error.message; status.classList.add('error'); }
+      finally { buttons.forEach((entry) => { entry.disabled = !aiEnabled; }); }
+    });
+    actions.append(button);
+  }
+  renderAIOutputs(job, outputs);
+  details.append(actions, status, outputs);
+  return details;
 }
 function statusActions(job, getNotes = () => job.notes) {
   const actions = element('div', undefined, 'actions');
@@ -94,7 +217,13 @@ function renderJobs() {
   body.replaceChildren();
   for (const job of jobs) {
     const row = element('tr');
-    for (const value of [job.title, job.company, job.location, `${job.source} / ${job.portal}`, job.status]) {
+    row.dataset.jobId = job.id;
+    const title = element('td', job.title, 'job-title');
+    title.append(skillChips(job));
+    const score = element('td');
+    score.append(scoreBadge(job));
+    row.append(title, score);
+    for (const value of [job.company, job.location, `${job.source} / ${job.portal}`, job.status]) {
       row.append(element('td', value));
     }
     const cell = element('td');
@@ -103,12 +232,15 @@ function renderJobs() {
     const actions = element('td');
     actions.append(statusActions(job));
     row.append(actions);
+    const ai = element('td');
+    ai.append(fitKit(job));
+    row.append(ai);
     body.append(row);
   }
   if (!jobs.length) {
     const row = element('tr');
     const cell = element('td', 'No jobs yet. Refresh jobs or add a posting URL.');
-    cell.colSpan = 7;
+    cell.colSpan = 9;
     row.append(cell);
     body.append(row);
   }
@@ -129,6 +261,7 @@ function renderTracker() {
   for (const job of jobs.filter((entry) => entry.status === currentStatus)) {
     const card = element('article', undefined, 'card');
     card.append(element('h3', job.title), element('p', job.company));
+    card.append(scoreBadge(job), skillChips(job));
     card.append(element('p', `${job.portal} · ${job.location || 'Location not listed'}`, 'muted'));
     card.append(element('p', job.days_since_applied === null ? 'Not applied yet' : `${job.days_since_applied} days since applied`, 'muted'));
     card.append(applyLink(job.job_url));
@@ -169,6 +302,7 @@ $('#resume-form').addEventListener('submit', async (event) => {
     const result = await api('/upload', { method: 'POST', body });
     renderProfile(result.profile);
     message('#resume-message', result.warning || 'Resume parsed and saved.');
+    await loadJobs();
   } catch (error) { message('#resume-message', error.message, true); }
   finally { button.disabled = false; }
 });
@@ -199,6 +333,17 @@ $('#add-form').addEventListener('submit', async (event) => {
     $('#job-url').value = '';
     await loadJobs();
   } catch (error) { message('#add-message', error.message, true); }
+  finally { button.disabled = false; }
+});
+$('#score-jobs').addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  message('#score-message', 'Scoring locally on CPU… First use downloads all-MiniLM-L6-v2; this may take a few minutes.');
+  try {
+    const result = await api('/score-jobs', { method: 'POST' });
+    await loadJobs();
+    message('#score-message', `${result.scored} jobs scored. ${result.embedded} new embeddings; ${result.cached} cached embeddings reused.`);
+  } catch (error) { message('#score-message', error.message, true); }
   finally { button.disabled = false; }
 });
 async function initialize() {

@@ -4,3 +4,4 @@ __pycache__/
 .env
 jobs.db
 jobs.db-*
+.cache/
