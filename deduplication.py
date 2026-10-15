@@ -5,7 +5,7 @@ import re
 import unicodedata
 from functools import lru_cache
 
-from job_filters import classify_visa, visa_flag_for_job
+from job_filters import classify_auth, auth_tier_for_job, extract_experience, experience_for_job
 
 
 @lru_cache(maxsize=4096)
@@ -34,8 +34,10 @@ def aliases(job):
 
 def source_info(job):
     result = {key: job[key] for key in ("source", "source_id_or_url", "job_url")}
-    result["visa_flag"] = (classify_visa(job["description"]) if "description" in job.keys()
-                           else job.get("visa_flag", "unknown"))
+    result["auth_tier"] = (classify_auth(job["description"]) if "description" in job.keys()
+                           else job.get("auth_tier", "unknown"))
+    result["exp_min"] = (extract_experience(job["description"]) if "description" in job.keys()
+                         else job.get("exp_min"))
     return result
 
 
@@ -72,8 +74,9 @@ def merge_rows(db, keeper, duplicate, timestamp):
     db.execute("UPDATE jobs SET status = ?, applied_at = ?, notes = ? WHERE id = ?",
                (status, min(dates) if dates else None, "\n\n".join(notes), keeper["id"]))
     current = db.execute("SELECT * FROM jobs WHERE id = ?", (keeper["id"],)).fetchone()
-    db.execute("UPDATE jobs SET visa_flag = ? WHERE id = ?",
-               (visa_flag_for_job(current["description"], aliases(current)), keeper["id"]))
+    db.execute("UPDATE jobs SET auth_tier = ?, exp_min = ? WHERE id = ?",
+               (auth_tier_for_job(current["description"], aliases(current)),
+                experience_for_job(current["description"], aliases(current)), keeper["id"]))
     db.execute("UPDATE job_events SET job_id = ? WHERE job_id = ?", (keeper["id"], duplicate["id"]))
     conflicts = []
     for output in db.execute("SELECT * FROM job_ai WHERE job_id = ?", (duplicate["id"],)).fetchall():

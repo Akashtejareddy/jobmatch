@@ -12,6 +12,17 @@
   <main class="container">
     <section aria-labelledby="resume-title">
       <h2 id="resume-title">1. Resume</h2>
+      <label class="authorization-setting">My work authorization
+        <select id="work-authorization">
+          <option>US Citizen</option>
+          <option>Green Card</option>
+          <option>H1B or other work visa</option>
+          <option selected>F-1 STEM OPT</option>
+          <option>F-1 OPT</option>
+          <option>Need sponsorship</option>
+        </select>
+      </label>
+      <p id="authorization-message" class="message" role="status"></p>
       <form id="resume-form">
         <label>PDF resume <input type="file" id="resume-file" accept="application/pdf,.pdf" required></label>
         <button type="submit">Parse</button>
@@ -36,7 +47,15 @@
         <button id="refresh-jobs" class="secondary" type="button">Refresh jobs</button>
       </form>
       <p class="muted">Generate queries from your resume, review them, then run discovery. Each query fetches up to 50 jobs per source for the selected date range. Use a role override with Refresh jobs for manual search.</p>
-      <label class="filter-toggle"><input id="hide-citizen-only" type="checkbox" checked> Hide US-citizen-only roles</label>
+      <fieldset class="experience-filters" id="experience-filters">
+        <legend>Required experience</legend>
+        <label><input type="checkbox" value="0-3" checked> 0–3 years</label>
+        <label><input type="checkbox" value="3-6" checked> 3–6 years</label>
+        <label><input type="checkbox" value="6-10" checked> 6–10 years</label>
+        <label><input type="checkbox" value="10+" checked> 10+ years</label>
+        <label><input type="checkbox" value="unspecified" checked> Unspecified</label>
+      </fieldset>
+      <button id="show-auth-hidden" class="secondary" type="button" hidden>Show hidden</button>
       <p id="filter-message" class="muted" role="status"></p>
       <p id="search-message" class="message" role="status"></p>
       <div id="discovery-plan" hidden>
@@ -55,7 +74,7 @@
       <p class="muted">Local CPU matching, no API key needed. The model downloads once on first use.</p>
       <p id="score-message" class="message" role="status"></p>
       <div class="table-wrap"><table>
-        <thead><tr><th>Role / skills</th><th>Match</th><th>Visa / sponsorship</th><th>Company</th><th>Location</th><th>Source / portal</th><th>Status</th><th>Apply</th><th>Update status</th><th>AI fit kit</th></tr></thead>
+        <thead><tr><th>Role / skills</th><th>Match</th><th>Work authorization</th><th>Company</th><th>Location</th><th>Source / portal</th><th>Status</th><th>Apply</th><th>Update status</th><th>AI fit kit</th></tr></thead>
         <tbody id="job-rows"></tbody>
       </table></div>
     </section>

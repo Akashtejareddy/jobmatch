@@ -19,7 +19,7 @@ class DiscoveryTests(unittest.TestCase):
 
     def profile(self, text='SQL Python SAS healthcare R', parsed=None):
         with main.database() as db:
-            db.execute('INSERT OR REPLACE INTO profile VALUES (1, ?, ?, ?, ?)',
+            db.execute('INSERT OR REPLACE INTO profile (id, raw_text, parsed_json, filename, uploaded_at) VALUES (1, ?, ?, ?, ?)',
                        (text, json.dumps(parsed) if parsed else None, 'resume.pdf', main.now()))
 
     def job(self, source='indeed', identity='1', title='Data Analyst', company='Acme Inc.', description='SQL analysis'):

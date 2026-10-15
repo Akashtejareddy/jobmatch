@@ -62,10 +62,14 @@ a { color: #1c6350; }
 .query-option { flex-direction: row; align-items: center; gap: 8px; font-weight: 400; overflow-wrap: anywhere; }
 .query-option input { flex-shrink: 0; margin: 0; accent-color: #21634e; }
 .also-on { margin: 6px 0 0; }
-.filter-toggle { flex-direction: row; align-items: center; margin: 16px 0; font-weight: 500; }
-.filter-toggle input { accent-color: #21634e; }
+.authorization-setting { max-width: 320px; margin-bottom: 16px; }
+.experience-filters { border: 1px solid #dce5df; border-radius: 8px; padding: 12px 16px; margin: 16px 0; display: flex; flex-wrap: wrap; gap: 12px; }
+.experience-filters label { flex-direction: row; align-items: center; font-weight: 400; }
+.experience-filters input { accent-color: #21634e; }
 .visa-badge { display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; white-space: nowrap; }
-.visa-badge.citizen-only { background: #fbe0e0; color: #92212b; }
-.visa-badge.opt-friendly { background: #ddf2df; color: #18552b; }
+.visa-badge.citizen { background: #fbe0e0; color: #92212b; }
+.visa-badge.permanent { background: #ffe5c6; color: #7a4408; }
+.visa-badge.authorized { background: #e0edff; color: #214a83; }
+.visa-badge.sponsors { background: #ddf2df; color: #18552b; }
 .visa-badge.unknown { background: #fff1b8; color: #6a4d00; }
 @media (max-width: 600px) { .container { padding: 16px; } section { padding: 16px; } form > label { width: 100%; } }

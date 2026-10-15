@@ -22,7 +22,8 @@ import matching
 import discovery
 import deduplication
 from fit_kit import ENABLE_MESSAGE, generate_fit_kit
-from job_filters import HourWindow, visa_flag_for_job, within_date_range
+from job_filters import (HourWindow, WorkAuthorization, ExperienceBucket, DEFAULT_AUTHORIZATION,
+                         auth_tier_for_job, auth_allowed, experience_for_job, experience_allowed, within_date_range)
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "jobs.db"
@@ -113,12 +114,15 @@ def init_db():
             db.execute("ALTER TABLE jobs ADD COLUMN match_score REAL")
         if "also_on" not in {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}:
             db.execute("ALTER TABLE jobs ADD COLUMN also_on TEXT NOT NULL DEFAULT '[]'")
-        if "visa_flag" not in {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}:
-            db.execute("ALTER TABLE jobs ADD COLUMN visa_flag TEXT NOT NULL DEFAULT 'unknown' "
-                       "CHECK (visa_flag IN ('citizen-only', 'opt-friendly', 'unknown'))")
-            for row in db.execute("SELECT id, description, also_on FROM jobs").fetchall():
-                db.execute("UPDATE jobs SET visa_flag = ? WHERE id = ?",
-                           (visa_flag_for_job(row["description"], json.loads(row["also_on"])), row["id"]))
+        # Reuse auth_tier if already present. Old visa_flag CHECK constraints only
+        # permit v4 values; leave that legacy column unused rather than rebuild jobs.
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
+        if "auth_tier" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN auth_tier TEXT")
+        if "exp_min" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN exp_min REAL")
+        if "work_authorization" not in {row["name"] for row in db.execute("PRAGMA table_info(profile)")}:
+            db.execute("ALTER TABLE profile ADD COLUMN work_authorization TEXT NOT NULL DEFAULT 'F-1 STEM OPT'")
 
 
 @asynccontextmanager
@@ -215,6 +219,20 @@ def get_profile():
     return {"profile": result}
 
 
+class ProfileSettings(BaseModel):
+    work_authorization: WorkAuthorization
+
+
+@app.patch("/profile")
+def update_profile_settings(request: ProfileSettings):
+    with database() as db:
+        # A setting can be saved before the first resume, without inventing resume data.
+        db.execute("INSERT INTO profile (id, raw_text, filename, uploaded_at, work_authorization) "
+                   "VALUES (1, '', '', '', ?) ON CONFLICT(id) DO UPDATE SET "
+                   "work_authorization = excluded.work_authorization", (request.work_authorization,))
+    return get_profile()
+
+
 @app.post("/upload")
 def upload(file: UploadFile = File(...)):
     content = file.file.read(10 * 1024 * 1024 + 1)
@@ -244,7 +262,9 @@ def upload(file: UploadFile = File(...)):
         warning = "No API key in .env. Extracted text saved without AI parsing."
     with database() as db:
         db.execute(
-            "INSERT OR REPLACE INTO profile VALUES (1, ?, ?, ?, ?)",
+            "INSERT INTO profile (id, raw_text, parsed_json, filename, uploaded_at) VALUES (1, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET raw_text = excluded.raw_text, parsed_json = excluded.parsed_json, "
+            "filename = excluded.filename, uploaded_at = excluded.uploaded_at",
             (text, json.dumps(parsed) if parsed is not None else None,
              file.filename or "resume.pdf", now()),
         )
@@ -289,14 +309,17 @@ def store_job(job):
             if alias is not None:
                 deduplication.add_alias(db, alias, job)
                 row = db.execute("SELECT * FROM jobs WHERE id = ?", (alias["id"],)).fetchone()
-                flag = visa_flag_for_job(row["description"], deduplication.aliases(row))
-                db.execute("UPDATE jobs SET fetched_at = ?, visa_flag = ? WHERE id = ?",
-                           (job["fetched_at"], flag, alias["id"]))
+                entries = deduplication.aliases(row)
+                db.execute("UPDATE jobs SET fetched_at = ?, auth_tier = ?, exp_min = ? WHERE id = ?",
+                           (job["fetched_at"], auth_tier_for_job(row["description"], entries),
+                            experience_for_job(row["description"], entries), alias["id"]))
                 row = db.execute("SELECT * FROM jobs WHERE id = ?", (alias["id"],)).fetchone()
                 return dict(row), False
-        job = {**job, "visa_flag": visa_flag_for_job(job["description"], deduplication.aliases(existing) if existing else [])}
+        entries = deduplication.aliases(existing) if existing else []
+        job = {**job, "auth_tier": auth_tier_for_job(job["description"], entries),
+               "exp_min": experience_for_job(job["description"], entries)}
         columns = ("source", "source_id_or_url", "title", "company", "location",
-                   "description", "job_url", "portal", "posted_at", "fetched_at", "visa_flag")
+                   "description", "job_url", "portal", "posted_at", "fetched_at", "auth_tier", "exp_min")
         values = [job.get(column) for column in columns]
         db.execute(
             f"INSERT INTO jobs ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)}) "
@@ -391,6 +414,7 @@ def add_job(request: AddJob):
     })
     with database() as db:
         db.execute("BEGIN IMMEDIATE")
+        refresh_job_requirements(db)
         redirects = deduplication.merge_existing(db, now())
         keeper_id = redirects.get(row["id"], row["id"])
         created = created and keeper_id == row["id"]
@@ -403,7 +427,8 @@ class Search(BaseModel):
     search_term: str = Field(default="data analyst", min_length=1, max_length=200)
     location: str = Field(default="USA", min_length=1, max_length=200)
     hours_old: HourWindow = 72
-    hide_citizen_only: bool = True
+    show_hidden_auth: bool = False
+    experience_buckets: list[ExperienceBucket] | None = None
 
 
 def clean(value, default=""):
@@ -412,15 +437,29 @@ def clean(value, default=""):
     return str(value)
 
 
-def ingest_jobs(search_term, location, hours_old=72, hide_citizen_only=True):
+def refresh_job_requirements(db):
+    # Reclassify stored jobs on ingestion, including jobs not returned this time.
+    for row in db.execute("SELECT id, description, also_on FROM jobs").fetchall():
+        entries = json.loads(row["also_on"])
+        db.execute("UPDATE jobs SET auth_tier = ?, exp_min = ? WHERE id = ?",
+                   (auth_tier_for_job(row["description"], entries), experience_for_job(row["description"], entries), row["id"]))
+
+
+def current_authorization():
+    profile = get_profile()["profile"]
+    return profile["work_authorization"] if profile else DEFAULT_AUTHORIZATION
+
+
+def ingest_jobs(search_term, location, hours_old=72, show_hidden_auth=False, experience_buckets=None):
     # Separate requests let working sites complete when another site fails.
     from jobspy import scrape_jobs
 
     results = []
     found_ids = set()
     new_ids = set()
+    authorization = current_authorization()
     for site in ("indeed", "linkedin", "glassdoor"):
-        added = updated = skipped = date_filtered = visa_hidden = 0
+        added = updated = skipped = date_filtered = auth_hidden = experience_filtered = 0
         try:
             frame = scrape_jobs(site_name=[site], search_term=search_term,
                                 location=location, results_wanted=50, hours_old=hours_old,
@@ -448,8 +487,11 @@ def ingest_jobs(search_term, location, hours_old=72, hide_citizen_only=True):
                     if not within_date_range(row["posted_at"], hours_old):
                         date_filtered += 1
                         continue
-                    if hide_citizen_only and row["visa_flag"] == "citizen-only":
-                        visa_hidden += 1
+                    if not show_hidden_auth and not auth_allowed(row["auth_tier"], authorization):
+                        auth_hidden += 1
+                        continue
+                    if not experience_allowed(row["exp_min"], experience_buckets):
+                        experience_filtered += 1
                         continue
                     found_ids.add(row["id"])
                     if created:
@@ -460,19 +502,21 @@ def ingest_jobs(search_term, location, hours_old=72, hide_citizen_only=True):
                     skipped += 1
                     logger.exception("Skipping an invalid job from %s", site)
             results.append({"site": site, "added": added, "updated": updated, "skipped": skipped,
-                            "date_filtered": date_filtered, "visa_hidden": visa_hidden,
+                            "date_filtered": date_filtered, "auth_hidden": auth_hidden, "experience_filtered": experience_filtered,
                             "warning": "No jobs returned; the site may have blocked the request or found no matches."
                             if frame.empty else None})
         except Exception:
             logger.exception("Job scrape failed for %s; continuing with other sources", site)
             results.append({"site": site, "added": added, "updated": updated, "skipped": skipped,
-                            "date_filtered": date_filtered, "visa_hidden": visa_hidden,
+                            "date_filtered": date_filtered, "auth_hidden": auth_hidden, "experience_filtered": experience_filtered,
                             "warning": "Scrape failed; this site may be blocking requests. Other sites were still attempted."})
     with database() as db:
         db.execute("BEGIN IMMEDIATE")
+        refresh_job_requirements(db)
         redirects = deduplication.merge_existing(db, now())
-        eligible = {row["id"] for row in db.execute("SELECT id, visa_flag, posted_at FROM jobs")
-                    if (not hide_citizen_only or row["visa_flag"] != "citizen-only")
+        eligible = {row["id"] for row in db.execute("SELECT id, auth_tier, exp_min, posted_at FROM jobs")
+                    if (show_hidden_auth or auth_allowed(row["auth_tier"], authorization))
+                    and experience_allowed(row["exp_min"], experience_buckets)
                     and within_date_range(row["posted_at"], hours_old)}
     def visible_ids(identities):
         mapped = {redirects.get(identity, identity) for identity in identities}
@@ -486,7 +530,7 @@ def ingest_jobs(search_term, location, hours_old=72, hide_citizen_only=True):
 
 @app.post("/refresh-jobs")
 def refresh_jobs(request: Search):
-    return ingest_jobs(request.search_term, request.location, request.hours_old, request.hide_citizen_only)
+    return ingest_jobs(request.search_term, request.location, request.hours_old, request.show_hidden_auth, request.experience_buckets)
 
 
 class DiscoveryPlan(BaseModel):
@@ -524,7 +568,8 @@ class DiscoveryRun(BaseModel):
     location: str = Field(default="USA", min_length=1, max_length=200)
     profile_uploaded_at: str | None = None
     hours_old: HourWindow = 72
-    hide_citizen_only: bool = True
+    show_hidden_auth: bool = False
+    experience_buckets: list[ExperienceBucket] | None = None
 
     @field_validator("queries")
     @classmethod
@@ -554,15 +599,17 @@ def run_discovery(request: DiscoveryRun):
         with database() as db:
             cursor = db.execute("INSERT INTO search_queries (query, created_at) VALUES (?, ?)", (query, now()))
             query_id = cursor.lastrowid
-        result = ingest_jobs(query, request.location, request.hours_old, request.hide_citizen_only)
+        result = ingest_jobs(query, request.location, request.hours_old, request.show_hidden_auth, request.experience_buckets)
         count = len(result["job_ids"])
         with database() as db:
             db.execute("UPDATE search_queries SET jobs_found = ? WHERE id = ?", (count, query_id))
         new_ids.update(result["new_job_ids"])
         results.append({"query": query, "jobs_found": count, "sources": result["sources"]})
-    if request.hide_citizen_only:
-        with database() as db:
-            new_ids -= {row["id"] for row in db.execute("SELECT id FROM jobs WHERE visa_flag = 'citizen-only'")}
+    authorization = current_authorization()
+    with database() as db:
+        new_ids -= {row["id"] for row in db.execute("SELECT id, auth_tier, exp_min FROM jobs")
+                    if (not request.show_hidden_auth and not auth_allowed(row["auth_tier"], authorization))
+                    or not experience_allowed(row["exp_min"], request.experience_buckets)}
     scoring = {"scored": 0, "embedded": 0, "cached": 0}
     warning = None
     if new_ids:
@@ -590,6 +637,9 @@ def get_jobs():
     for row in rows:
         job = dict(row)
         job["also_on"] = json.loads(row["also_on"])
+        # Old rows work with the new controls before their next ingestion refresh.
+        job["auth_tier"] = row["auth_tier"] or auth_tier_for_job(row["description"], job["also_on"])
+        job["exp_min"] = row["exp_min"] if row["exp_min"] is not None else experience_for_job(row["description"], job["also_on"])
         job["days_since_applied"] = (
             (datetime.now(timezone.utc) - datetime.fromisoformat(row["applied_at"])).days
             if row["applied_at"] else None

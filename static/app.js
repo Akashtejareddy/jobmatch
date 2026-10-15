@@ -5,6 +5,10 @@ let aiEnabled = false;
 let aiEnableMessage = 'Add OPENAI_API_KEY to .env to enable';
 let discoveryProfileVersion = null;
 let discoveryBusy = false;
+let currentProfile = null;
+let showHiddenAuth = false;
+const authorizationLevels = { 'US Citizen': 4, 'Green Card': 3, 'H1B or other work visa': 2, 'F-1 STEM OPT': 1, 'F-1 OPT': 1, 'Need sponsorship': 0 };
+const requiredLevels = { citizen: 4, permanent: 3, authorized: 1, sponsors: 0, unknown: 0 };
 const statuses = ['saved', 'applied', 'interview', 'offer', 'rejected'];
 const transitions = { saved: ['applied'], applied: ['interview', 'rejected'], interview: ['offer', 'rejected'], offer: [], rejected: [] };
 
@@ -40,9 +44,15 @@ function applyLink(url) {
   return link;
 }
 function renderProfile(profile) {
+  currentProfile = profile;
+  $('#work-authorization').value = profile?.work_authorization || 'F-1 STEM OPT';
+  const years = profile?.parsed?.total_years_experience;
+  for (const checkbox of document.querySelectorAll('#experience-filters input')) {
+    checkbox.checked = checkbox.value === 'unspecified' || typeof years !== 'number' || !Number.isFinite(years) || years < 0 || checkbox.value === experienceBucket(years);
+  }
   const container = $('#profile');
   container.replaceChildren();
-  if (!profile) {
+  if (!profile || !profile.filename) {
     container.append(element('p', 'Upload a resume to get started.', 'muted'));
     return;
   }
@@ -85,15 +95,16 @@ function rememberLocation() {
   return location;
 }
 function sourceSummary(sources) {
-  return sources.map((source) => `${source.site}: ${source.added} new, ${source.updated} refreshed, ${source.skipped} skipped.${source.date_filtered ? ` ${source.date_filtered} outside date range.` : ''}${source.visa_hidden ? ` ${source.visa_hidden} citizen-only hidden.` : ''}${source.warning ? ` ${source.warning}` : ''}`).join('\n');
+  return sources.map((source) => `${source.site}: ${source.added} new, ${source.updated} refreshed, ${source.skipped} skipped.${source.date_filtered ? ` ${source.date_filtered} outside date range.` : ''}${source.auth_hidden ? ` ${source.auth_hidden} hidden by work authorization.` : ''}${source.experience_filtered ? ` ${source.experience_filtered} outside experience buckets.` : ''}${source.warning ? ` ${source.warning}` : ''}`).join('\n');
 }
 function updateDiscoveryControls() {
-  for (const selector of ['#discover-jobs', '#refresh-jobs', '#location', '#search-term', '#date-range', '#hide-citizen-only']) $(selector).disabled = discoveryBusy;
+  for (const selector of ['#discover-jobs', '#refresh-jobs', '#location', '#search-term', '#date-range']) $(selector).disabled = discoveryBusy;
   for (const checkbox of document.querySelectorAll('#query-options input')) checkbox.disabled = discoveryBusy;
   $('#run-discovery').disabled = discoveryBusy || !document.querySelector('#query-options input:checked');
 }
 function searchFilters() {
-  return { hours_old: Number($('#date-range').value), hide_citizen_only: $('#hide-citizen-only').checked };
+  return { hours_old: Number($('#date-range').value), show_hidden_auth: showHiddenAuth,
+    experience_buckets: [...document.querySelectorAll('#experience-filters input:checked')].map((input) => input.value) };
 }
 function postedTime(value) {
   if (!value) return NaN;
@@ -105,22 +116,32 @@ function postedTime(value) {
   const iso = text.replace(' ', 'T');
   return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`);
 }
-function visibleJobs(applyDateRange = true) {
+function authorizationAllowed(job) {
+  return (requiredLevels[job.auth_tier] || 0) <= authorizationLevels[$('#work-authorization').value];
+}
+function experienceBucket(years) {
+  if (years === null || years === undefined) return 'unspecified';
+  if (years < 3) return '0-3';
+  if (years < 6) return '3-6';
+  if (years < 10) return '6-10';
+  return '10+';
+}
+function visibleJobs(applyDateRange = true, includeAuthHidden = showHiddenAuth) {
   const filters = searchFilters();
   const cutoff = Date.now() - filters.hours_old * 60 * 60 * 1000;
   return jobs.filter((job) => {
-    if (filters.hide_citizen_only && job.visa_flag === 'citizen-only') return false;
+    if (!includeAuthHidden && !authorizationAllowed(job)) return false;
+    if (applyDateRange && !filters.experience_buckets.includes(experienceBucket(job.exp_min))) return false;
     const posted = postedTime(job.posted_at);
     return !applyDateRange || Number.isNaN(posted) || posted >= cutoff;
   });
 }
-function visaBadge(job) {
-  return element('span', job.visa_flag, `visa-badge ${job.visa_flag}`);
+function authBadge(job) {
+  return element('span', job.auth_tier, `visa-badge ${job.auth_tier}`);
 }
 function saveFilters() {
   try {
     localStorage.setItem('jobmatch.hours_old', $('#date-range').value);
-    localStorage.setItem('jobmatch.hide_citizen_only', String($('#hide-citizen-only').checked));
   } catch (_) { /* Use the current controls when storage is unavailable. */ }
   renderJobs();
   renderTracker();
@@ -269,17 +290,23 @@ function renderJobs() {
   const body = $('#job-rows');
   body.replaceChildren();
   const visible = visibleJobs();
+  const authHiddenCount = visibleJobs(true, true).filter((job) => !authorizationAllowed(job)).length;
+  const reveal = $('#show-auth-hidden');
+  reveal.hidden = authHiddenCount === 0;
+  reveal.textContent = showHiddenAuth ? `Hide ${authHiddenCount} restricted` : `Show ${authHiddenCount} hidden`;
+  reveal.setAttribute('aria-expanded', String(showHiddenAuth));
   $('#filter-message').textContent = `${visible.length} of ${jobs.length} saved jobs shown. Date range filters results; older applications stay in the tracker.`;
   for (const job of visible) {
     const row = element('tr');
     row.dataset.jobId = job.id;
     const title = element('td', job.title, 'job-title');
+    title.append(element('p', job.exp_min === null ? 'Experience unspecified' : `Minimum experience: ${job.exp_min} years`, 'muted'));
     title.append(skillChips(job));
     const score = element('td');
     score.append(scoreBadge(job));
     row.append(title, score);
     const visa = element('td');
-    visa.append(visaBadge(job));
+    visa.append(authBadge(job));
     row.append(visa);
     for (const value of [job.company, job.location]) {
       row.append(element('td', value));
@@ -301,7 +328,7 @@ function renderJobs() {
   }
   if (!visible.length) {
     const row = element('tr');
-    const cell = element('td', jobs.length ? 'No jobs match these filters. Change the date range or sponsorship toggle.' : 'No jobs yet. Refresh jobs or add a posting URL.');
+    const cell = element('td', jobs.length ? 'No jobs match these filters. Adjust experience or work authorization, or show hidden roles.' : 'No jobs yet. Refresh jobs or add a posting URL.');
     cell.colSpan = 10;
     row.append(cell);
     body.append(row);
@@ -324,7 +351,7 @@ function renderTracker() {
   for (const job of trackerJobs.filter((entry) => entry.status === currentStatus)) {
     const card = element('article', undefined, 'card');
     card.append(element('h3', job.title), element('p', job.company));
-    card.append(scoreBadge(job), visaBadge(job), skillChips(job));
+    card.append(scoreBadge(job), authBadge(job), skillChips(job));
     card.append(element('p', `${job.portal} · ${job.location || 'Location not listed'}`, 'muted'));
     const hint = alsoOn(job);
     if (hint) card.append(hint);
@@ -475,16 +502,41 @@ $('#score-jobs').addEventListener('click', async (event) => {
   } catch (error) { message('#score-message', error.message, true); }
   finally { button.disabled = false; }
 });
+$('#work-authorization').addEventListener('change', async (event) => {
+  const selector = event.currentTarget;
+  const previous = currentProfile?.work_authorization || 'F-1 STEM OPT';
+  showHiddenAuth = false;
+  renderJobs();
+  renderTracker();
+  selector.disabled = true;
+  message('#authorization-message', 'Saving work authorization…');
+  try {
+    const result = await api('/profile', jsonRequest('PATCH', { work_authorization: selector.value }));
+    currentProfile = result.profile;
+    message('#authorization-message', 'Work authorization saved. Filters updated.');
+  } catch (error) {
+    selector.value = previous;
+    renderJobs();
+    renderTracker();
+    message('#authorization-message', error.message, true);
+  } finally { selector.disabled = false; }
+});
+$('#show-auth-hidden').addEventListener('click', () => {
+  showHiddenAuth = !showHiddenAuth;
+  renderJobs();
+  renderTracker();
+});
+for (const checkbox of document.querySelectorAll('#experience-filters input')) {
+  checkbox.addEventListener('change', () => { renderJobs(); renderTracker(); });
+}
 async function initialize() {
   try { $('#location').value = localStorage.getItem('jobmatch.location') || 'USA'; } catch (_) { /* Use USA by default. */ }
   $('#location').addEventListener('change', rememberLocation);
   try {
     const hours = localStorage.getItem('jobmatch.hours_old');
     if (['24', '48', '72', '168', '720', '2160'].includes(hours)) $('#date-range').value = hours;
-    $('#hide-citizen-only').checked = localStorage.getItem('jobmatch.hide_citizen_only') !== 'false';
-  } catch (_) { /* Defaults: 3 days and hide citizen-only roles. */ }
+  } catch (_) { /* Default: 3 days. */ }
   $('#date-range').addEventListener('change', saveFilters);
-  $('#hide-citizen-only').addEventListener('change', saveFilters);
   try { renderProfile((await api('/profile')).profile); }
   catch (error) { message('#resume-message', error.message, true); }
   try { await loadJobs(); }
