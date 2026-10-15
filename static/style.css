@@ -1,0 +1,43 @@
+:root { color-scheme: light; font-family: system-ui, sans-serif; color: #18312e; background: #f3f6f4; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.container { max-width: 1160px; margin: auto; padding: 24px; }
+header { background: #153e36; color: #fff; }
+h1 { margin: 0; font-size: 30px; letter-spacing: -.8px; }
+header p { color: #d0e6dc; margin-bottom: 0; }
+h2 { font-size: 20px; margin-top: 0; }
+h3 { margin: 0 0 8px; font-size: 18px; }
+h4 { margin-bottom: 8px; }
+section { background: #fff; padding: 24px; margin-bottom: 24px; border: 1px solid #dce5df; border-radius: 12px; }
+form { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; font-weight: 600; }
+input, textarea, button { font: inherit; border-radius: 6px; }
+input, textarea { padding: 10px; border: 1px solid #a7b9b1; background: #fff; color: #18312e; max-width: 100%; }
+input[type=file] { width: 100%; }
+button { padding: 11px 16px; border: 1px solid #21634e; background: #21634e; color: #fff; cursor: pointer; }
+button:hover { background: #164d3b; }
+button:disabled { opacity: .55; cursor: wait; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible { outline: 3px solid #dba126; outline-offset: 3px; }
+.grow { flex: 1; min-width: 220px; }
+.muted { color: #587068; font-size: 14px; }
+.message { white-space: pre-line; font-size: 14px; }
+.message:empty { display: none; }
+.error { color: #a42b32; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; }
+.table-wrap { overflow-x: auto; margin-top: 24px; }
+table { border-collapse: collapse; width: 100%; text-align: left; font-size: 14px; }
+th { color: #587068; background: #f3f6f4; }
+td, th { padding: 12px; border-bottom: 1px solid #dce5df; }
+a { color: #1c6350; }
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+.tabs button { background: #fff; color: #21634e; }
+.tabs button[aria-pressed=true] { background: #21634e; color: white; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 290px), 1fr)); gap: 16px; }
+.card { border: 1px solid #dce5df; border-radius: 8px; padding: 20px; min-width: 0; overflow-wrap: anywhere; }
+.card p { margin: 8px 0; }
+.card textarea { width: 100%; min-height: 80px; resize: vertical; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.actions button { font-size: 13px; padding: 8px 10px; }
+.notes-form { display: block; margin-top: 16px; }
+.notes-form button { margin-top: 8px; background: white; color: #21634e; }
+@media (max-width: 600px) { .container { padding: 16px; } section { padding: 16px; } form > label { width: 100%; } }

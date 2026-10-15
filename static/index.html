@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jobmatch</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header><div class="container"><h1>Jobmatch</h1><p>Your resume, job search, and application tracker.</p></div></header>
+  <main class="container">
+    <section aria-labelledby="resume-title">
+      <h2 id="resume-title">1. Resume</h2>
+      <form id="resume-form">
+        <label>PDF resume <input type="file" id="resume-file" accept="application/pdf,.pdf" required></label>
+        <button type="submit">Parse</button>
+      </form>
+      <p id="resume-message" class="message" role="status"></p>
+      <div id="profile"><p class="muted">Upload a resume to get started.</p></div>
+    </section>
+    <section aria-labelledby="search-title">
+      <h2 id="search-title">2. Find jobs</h2>
+      <form id="search-form">
+        <label>Role <input id="search-term" value="data analyst" maxlength="200" required></label>
+        <label>Location <input id="location" value="USA" maxlength="200" required></label>
+        <button type="submit">Refresh jobs</button>
+      </form>
+      <p class="muted">Fetches up to 50 jobs per source from the last 72 hours. This can take a few minutes.</p>
+      <p id="search-message" class="message" role="status"></p>
+      <form id="add-form">
+        <label class="grow">Add job by URL <input id="job-url" type="url" placeholder="https://company.com/careers/job" required></label>
+        <button type="submit">Add job</button>
+      </form>
+      <p id="add-message" class="message" role="status"></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Role</th><th>Company</th><th>Location</th><th>Source / portal</th><th>Status</th><th>Apply</th><th>Update status</th></tr></thead>
+        <tbody id="job-rows"></tbody>
+      </table></div>
+    </section>
+    <section aria-labelledby="tracker-title">
+      <h2 id="tracker-title">3. Application tracker</h2>
+      <div id="status-tabs" class="tabs" role="group" aria-label="Filter by application status"></div>
+      <p id="tracker-message" class="message" role="status"></p>
+      <div id="tracker" class="cards"></div>
+    </section>
+  </main>
+</body>
+</html>
