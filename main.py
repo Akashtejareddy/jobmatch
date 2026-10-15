@@ -22,6 +22,7 @@ import matching
 import discovery
 import deduplication
 from fit_kit import ENABLE_MESSAGE, generate_fit_kit
+from job_filters import HourWindow, visa_flag_for_job, within_date_range
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "jobs.db"
@@ -112,6 +113,12 @@ def init_db():
             db.execute("ALTER TABLE jobs ADD COLUMN match_score REAL")
         if "also_on" not in {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}:
             db.execute("ALTER TABLE jobs ADD COLUMN also_on TEXT NOT NULL DEFAULT '[]'")
+        if "visa_flag" not in {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}:
+            db.execute("ALTER TABLE jobs ADD COLUMN visa_flag TEXT NOT NULL DEFAULT 'unknown' "
+                       "CHECK (visa_flag IN ('citizen-only', 'opt-friendly', 'unknown'))")
+            for row in db.execute("SELECT id, description, also_on FROM jobs").fetchall():
+                db.execute("UPDATE jobs SET visa_flag = ? WHERE id = ?",
+                           (visa_flag_for_job(row["description"], json.loads(row["also_on"])), row["id"]))
 
 
 @asynccontextmanager
@@ -281,11 +288,15 @@ def store_job(job):
                               if deduplication.same_posting(row, job)), None)
             if alias is not None:
                 deduplication.add_alias(db, alias, job)
-                db.execute("UPDATE jobs SET fetched_at = ? WHERE id = ?", (job["fetched_at"], alias["id"]))
+                row = db.execute("SELECT * FROM jobs WHERE id = ?", (alias["id"],)).fetchone()
+                flag = visa_flag_for_job(row["description"], deduplication.aliases(row))
+                db.execute("UPDATE jobs SET fetched_at = ?, visa_flag = ? WHERE id = ?",
+                           (job["fetched_at"], flag, alias["id"]))
                 row = db.execute("SELECT * FROM jobs WHERE id = ?", (alias["id"],)).fetchone()
                 return dict(row), False
+        job = {**job, "visa_flag": visa_flag_for_job(job["description"], deduplication.aliases(existing) if existing else [])}
         columns = ("source", "source_id_or_url", "title", "company", "location",
-                   "description", "job_url", "portal", "posted_at", "fetched_at")
+                   "description", "job_url", "portal", "posted_at", "fetched_at", "visa_flag")
         values = [job.get(column) for column in columns]
         db.execute(
             f"INSERT INTO jobs ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)}) "
@@ -391,6 +402,8 @@ def add_job(request: AddJob):
 class Search(BaseModel):
     search_term: str = Field(default="data analyst", min_length=1, max_length=200)
     location: str = Field(default="USA", min_length=1, max_length=200)
+    hours_old: HourWindow = 72
+    hide_citizen_only: bool = True
 
 
 def clean(value, default=""):
@@ -399,7 +412,7 @@ def clean(value, default=""):
     return str(value)
 
 
-def ingest_jobs(search_term, location):
+def ingest_jobs(search_term, location, hours_old=72, hide_citizen_only=True):
     # Separate requests let working sites complete when another site fails.
     from jobspy import scrape_jobs
 
@@ -407,13 +420,17 @@ def ingest_jobs(search_term, location):
     found_ids = set()
     new_ids = set()
     for site in ("indeed", "linkedin", "glassdoor"):
-        added = updated = skipped = 0
+        added = updated = skipped = date_filtered = visa_hidden = 0
         try:
             frame = scrape_jobs(site_name=[site], search_term=search_term,
-                                location=location, results_wanted=50, hours_old=72,
+                                location=location, results_wanted=50, hours_old=hours_old,
                                 country_indeed="USA")
             for record in frame.to_dict(orient="records"):
                 try:
+                    posted_at = clean(record.get("date_posted"), None)
+                    if not within_date_range(posted_at, hours_old):
+                        date_filtered += 1
+                        continue
                     url = clean(record.get("job_url"))
                     identity = clean(record.get("id")) or url
                     if not identity or not valid_url(url):
@@ -426,8 +443,14 @@ def ingest_jobs(search_term, location):
                         "location": clean(record.get("location")),
                         "description": clean(record.get("description")), "job_url": url,
                         "portal": portal_for(clean(record.get("job_url_direct")) or url),
-                        "posted_at": clean(record.get("date_posted"), None), "fetched_at": now(),
+                        "posted_at": posted_at, "fetched_at": now(),
                     })
+                    if not within_date_range(row["posted_at"], hours_old):
+                        date_filtered += 1
+                        continue
+                    if hide_citizen_only and row["visa_flag"] == "citizen-only":
+                        visa_hidden += 1
+                        continue
                     found_ids.add(row["id"])
                     if created:
                         new_ids.add(row["id"])
@@ -437,24 +460,33 @@ def ingest_jobs(search_term, location):
                     skipped += 1
                     logger.exception("Skipping an invalid job from %s", site)
             results.append({"site": site, "added": added, "updated": updated, "skipped": skipped,
+                            "date_filtered": date_filtered, "visa_hidden": visa_hidden,
                             "warning": "No jobs returned; the site may have blocked the request or found no matches."
                             if frame.empty else None})
         except Exception:
             logger.exception("Job scrape failed for %s; continuing with other sources", site)
             results.append({"site": site, "added": added, "updated": updated, "skipped": skipped,
+                            "date_filtered": date_filtered, "visa_hidden": visa_hidden,
                             "warning": "Scrape failed; this site may be blocking requests. Other sites were still attempted."})
     with database() as db:
         db.execute("BEGIN IMMEDIATE")
         redirects = deduplication.merge_existing(db, now())
+        eligible = {row["id"] for row in db.execute("SELECT id, visa_flag, posted_at FROM jobs")
+                    if (not hide_citizen_only or row["visa_flag"] != "citizen-only")
+                    and within_date_range(row["posted_at"], hours_old)}
+    def visible_ids(identities):
+        mapped = {redirects.get(identity, identity) for identity in identities}
+        # A later source can add a red phrase or merge into an older posting.
+        return sorted(mapped & eligible)
     return {"sources": results,
-            "job_ids": sorted({redirects.get(identity, identity) for identity in found_ids}),
-            "new_job_ids": sorted({redirects.get(identity, identity) for identity in new_ids}),
+            "job_ids": visible_ids(found_ids),
+            "new_job_ids": visible_ids(new_ids),
             "merged": len(redirects)}
 
 
 @app.post("/refresh-jobs")
 def refresh_jobs(request: Search):
-    return ingest_jobs(request.search_term, request.location)
+    return ingest_jobs(request.search_term, request.location, request.hours_old, request.hide_citizen_only)
 
 
 class DiscoveryPlan(BaseModel):
@@ -491,6 +523,8 @@ class DiscoveryRun(BaseModel):
     queries: list[str] = Field(min_length=1, max_length=12)
     location: str = Field(default="USA", min_length=1, max_length=200)
     profile_uploaded_at: str | None = None
+    hours_old: HourWindow = 72
+    hide_citizen_only: bool = True
 
     @field_validator("queries")
     @classmethod
@@ -520,12 +554,15 @@ def run_discovery(request: DiscoveryRun):
         with database() as db:
             cursor = db.execute("INSERT INTO search_queries (query, created_at) VALUES (?, ?)", (query, now()))
             query_id = cursor.lastrowid
-        result = ingest_jobs(query, request.location)
+        result = ingest_jobs(query, request.location, request.hours_old, request.hide_citizen_only)
         count = len(result["job_ids"])
         with database() as db:
             db.execute("UPDATE search_queries SET jobs_found = ? WHERE id = ?", (count, query_id))
         new_ids.update(result["new_job_ids"])
         results.append({"query": query, "jobs_found": count, "sources": result["sources"]})
+    if request.hide_citizen_only:
+        with database() as db:
+            new_ids -= {row["id"] for row in db.execute("SELECT id FROM jobs WHERE visa_flag = 'citizen-only'")}
     scoring = {"scored": 0, "embedded": 0, "cached": 0}
     warning = None
     if new_ids:

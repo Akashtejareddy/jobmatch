@@ -185,7 +185,7 @@ class AppTests(unittest.TestCase):
                 return pd.DataFrame()
             return pd.DataFrame([{"id": "ln-123", "job_url": "https://www.linkedin.com/jobs/view/123",
                                   "title": "Analyst", "company": "Example", "location": "USA",
-                                  "description": "SQL", "date_posted": "2026-10-01"}])
+                                  "description": "SQL", "date_posted": main.now()}])
         with patch("jobspy.scrape_jobs", side_effect=scrape) as mocked:
             result = self.client.post("/refresh-jobs", json={})
             self.assertEqual(result.status_code, 200)

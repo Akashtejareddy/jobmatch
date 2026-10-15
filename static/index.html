@@ -24,10 +24,20 @@
       <form id="search-form">
         <label>Role override (optional) <input id="search-term" placeholder="Use titles and skills from my resume" maxlength="200"></label>
         <label>Location <input id="location" value="USA" maxlength="200" required></label>
+        <label>Date range <select id="date-range">
+          <option value="24">Last 24 hours</option>
+          <option value="48">2 days</option>
+          <option value="72" selected>3 days</option>
+          <option value="168">1 week</option>
+          <option value="720">1 month</option>
+          <option value="2160">3 months</option>
+        </select></label>
         <button id="discover-jobs" type="submit">Discover jobs for me</button>
         <button id="refresh-jobs" class="secondary" type="button">Refresh jobs</button>
       </form>
-      <p class="muted">Generate queries from your resume, review them, then run discovery. Each query fetches up to 50 jobs per source from the last 72 hours. Use a role override with Refresh jobs for manual search.</p>
+      <p class="muted">Generate queries from your resume, review them, then run discovery. Each query fetches up to 50 jobs per source for the selected date range. Use a role override with Refresh jobs for manual search.</p>
+      <label class="filter-toggle"><input id="hide-citizen-only" type="checkbox" checked> Hide US-citizen-only roles</label>
+      <p id="filter-message" class="muted" role="status"></p>
       <p id="search-message" class="message" role="status"></p>
       <div id="discovery-plan" hidden>
         <p id="detected-title"></p>
@@ -45,7 +55,7 @@
       <p class="muted">Local CPU matching, no API key needed. The model downloads once on first use.</p>
       <p id="score-message" class="message" role="status"></p>
       <div class="table-wrap"><table>
-        <thead><tr><th>Role / skills</th><th>Match</th><th>Company</th><th>Location</th><th>Source / portal</th><th>Status</th><th>Apply</th><th>Update status</th><th>AI fit kit</th></tr></thead>
+        <thead><tr><th>Role / skills</th><th>Match</th><th>Visa / sponsorship</th><th>Company</th><th>Location</th><th>Source / portal</th><th>Status</th><th>Apply</th><th>Update status</th><th>AI fit kit</th></tr></thead>
         <tbody id="job-rows"></tbody>
       </table></div>
     </section>

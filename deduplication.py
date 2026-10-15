@@ -5,6 +5,8 @@ import re
 import unicodedata
 from functools import lru_cache
 
+from job_filters import classify_visa, visa_flag_for_job
+
 
 @lru_cache(maxsize=4096)
 def normalized_company(company):
@@ -31,7 +33,10 @@ def aliases(job):
 
 
 def source_info(job):
-    return {key: job[key] for key in ("source", "source_id_or_url", "job_url")}
+    result = {key: job[key] for key in ("source", "source_id_or_url", "job_url")}
+    result["visa_flag"] = (classify_visa(job["description"]) if "description" in job.keys()
+                           else job.get("visa_flag", "unknown"))
+    return result
 
 
 def sources(job):
@@ -66,6 +71,9 @@ def merge_rows(db, keeper, duplicate, timestamp):
     notes = list(dict.fromkeys(job["notes"] for job in (keeper, duplicate) if job["notes"]))
     db.execute("UPDATE jobs SET status = ?, applied_at = ?, notes = ? WHERE id = ?",
                (status, min(dates) if dates else None, "\n\n".join(notes), keeper["id"]))
+    current = db.execute("SELECT * FROM jobs WHERE id = ?", (keeper["id"],)).fetchone()
+    db.execute("UPDATE jobs SET visa_flag = ? WHERE id = ?",
+               (visa_flag_for_job(current["description"], aliases(current)), keeper["id"]))
     db.execute("UPDATE job_events SET job_id = ? WHERE job_id = ?", (keeper["id"], duplicate["id"]))
     conflicts = []
     for output in db.execute("SELECT * FROM job_ai WHERE job_id = ?", (duplicate["id"],)).fetchall():

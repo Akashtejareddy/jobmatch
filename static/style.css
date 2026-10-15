@@ -11,13 +11,13 @@ h4 { margin-bottom: 8px; }
 section { background: #fff; padding: 24px; margin-bottom: 24px; border: 1px solid #dce5df; border-radius: 12px; }
 form { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
 label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; font-weight: 600; }
-input, textarea, button { font: inherit; border-radius: 6px; }
-input, textarea { padding: 10px; border: 1px solid #a7b9b1; background: #fff; color: #18312e; max-width: 100%; }
+input, textarea, select, button { font: inherit; border-radius: 6px; }
+input, textarea, select { padding: 10px; border: 1px solid #a7b9b1; background: #fff; color: #18312e; max-width: 100%; }
 input[type=file] { width: 100%; }
 button { padding: 11px 16px; border: 1px solid #21634e; background: #21634e; color: #fff; cursor: pointer; }
 button:hover { background: #164d3b; }
 button:disabled { opacity: .55; cursor: wait; }
-button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible { outline: 3px solid #dba126; outline-offset: 3px; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid #dba126; outline-offset: 3px; }
 .grow { flex: 1; min-width: 220px; }
 .muted { color: #587068; font-size: 14px; }
 .message { white-space: pre-line; font-size: 14px; }
@@ -62,4 +62,10 @@ a { color: #1c6350; }
 .query-option { flex-direction: row; align-items: center; gap: 8px; font-weight: 400; overflow-wrap: anywhere; }
 .query-option input { flex-shrink: 0; margin: 0; accent-color: #21634e; }
 .also-on { margin: 6px 0 0; }
+.filter-toggle { flex-direction: row; align-items: center; margin: 16px 0; font-weight: 500; }
+.filter-toggle input { accent-color: #21634e; }
+.visa-badge { display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.visa-badge.citizen-only { background: #fbe0e0; color: #92212b; }
+.visa-badge.opt-friendly { background: #ddf2df; color: #18552b; }
+.visa-badge.unknown { background: #fff1b8; color: #6a4d00; }
 @media (max-width: 600px) { .container { padding: 16px; } section { padding: 16px; } form > label { width: 100%; } }

@@ -85,12 +85,45 @@ function rememberLocation() {
   return location;
 }
 function sourceSummary(sources) {
-  return sources.map((source) => `${source.site}: ${source.added} new, ${source.updated} refreshed, ${source.skipped} skipped.${source.warning ? ` ${source.warning}` : ''}`).join('\n');
+  return sources.map((source) => `${source.site}: ${source.added} new, ${source.updated} refreshed, ${source.skipped} skipped.${source.date_filtered ? ` ${source.date_filtered} outside date range.` : ''}${source.visa_hidden ? ` ${source.visa_hidden} citizen-only hidden.` : ''}${source.warning ? ` ${source.warning}` : ''}`).join('\n');
 }
 function updateDiscoveryControls() {
-  for (const selector of ['#discover-jobs', '#refresh-jobs', '#location', '#search-term']) $(selector).disabled = discoveryBusy;
+  for (const selector of ['#discover-jobs', '#refresh-jobs', '#location', '#search-term', '#date-range', '#hide-citizen-only']) $(selector).disabled = discoveryBusy;
   for (const checkbox of document.querySelectorAll('#query-options input')) checkbox.disabled = discoveryBusy;
   $('#run-discovery').disabled = discoveryBusy || !document.querySelector('#query-options input:checked');
+}
+function searchFilters() {
+  return { hours_old: Number($('#date-range').value), hide_citizen_only: $('#hide-citizen-only').checked };
+}
+function postedTime(value) {
+  if (!value) return NaN;
+  const text = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    const date = new Date(`${text}T23:59:59.999Z`);
+    return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== text ? NaN : date.getTime();
+  }
+  const iso = text.replace(' ', 'T');
+  return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`);
+}
+function visibleJobs(applyDateRange = true) {
+  const filters = searchFilters();
+  const cutoff = Date.now() - filters.hours_old * 60 * 60 * 1000;
+  return jobs.filter((job) => {
+    if (filters.hide_citizen_only && job.visa_flag === 'citizen-only') return false;
+    const posted = postedTime(job.posted_at);
+    return !applyDateRange || Number.isNaN(posted) || posted >= cutoff;
+  });
+}
+function visaBadge(job) {
+  return element('span', job.visa_flag, `visa-badge ${job.visa_flag}`);
+}
+function saveFilters() {
+  try {
+    localStorage.setItem('jobmatch.hours_old', $('#date-range').value);
+    localStorage.setItem('jobmatch.hide_citizen_only', String($('#hide-citizen-only').checked));
+  } catch (_) { /* Use the current controls when storage is unavailable. */ }
+  renderJobs();
+  renderTracker();
 }
 function alsoOn(job) {
   const names = [...new Set(job.also_on.map((entry) => entry.source))];
@@ -235,7 +268,9 @@ function statusActions(job, getNotes = () => job.notes) {
 function renderJobs() {
   const body = $('#job-rows');
   body.replaceChildren();
-  for (const job of jobs) {
+  const visible = visibleJobs();
+  $('#filter-message').textContent = `${visible.length} of ${jobs.length} saved jobs shown. Date range filters results; older applications stay in the tracker.`;
+  for (const job of visible) {
     const row = element('tr');
     row.dataset.jobId = job.id;
     const title = element('td', job.title, 'job-title');
@@ -243,6 +278,9 @@ function renderJobs() {
     const score = element('td');
     score.append(scoreBadge(job));
     row.append(title, score);
+    const visa = element('td');
+    visa.append(visaBadge(job));
+    row.append(visa);
     for (const value of [job.company, job.location]) {
       row.append(element('td', value));
     }
@@ -261,10 +299,10 @@ function renderJobs() {
     row.append(ai);
     body.append(row);
   }
-  if (!jobs.length) {
+  if (!visible.length) {
     const row = element('tr');
-    const cell = element('td', 'No jobs yet. Refresh jobs or add a posting URL.');
-    cell.colSpan = 9;
+    const cell = element('td', jobs.length ? 'No jobs match these filters. Change the date range or sponsorship toggle.' : 'No jobs yet. Refresh jobs or add a posting URL.');
+    cell.colSpan = 10;
     row.append(cell);
     body.append(row);
   }
@@ -272,8 +310,9 @@ function renderJobs() {
 function renderTracker() {
   const tabs = $('#status-tabs');
   tabs.replaceChildren();
+  const trackerJobs = visibleJobs(false);
   for (const status of statuses) {
-    const count = jobs.filter((job) => job.status === status).length;
+    const count = trackerJobs.filter((job) => job.status === status).length;
     const button = element('button', `${status[0].toUpperCase() + status.slice(1)} (${count})`);
     button.type = 'button';
     button.setAttribute('aria-pressed', String(currentStatus === status));
@@ -282,10 +321,10 @@ function renderTracker() {
   }
   const container = $('#tracker');
   container.replaceChildren();
-  for (const job of jobs.filter((entry) => entry.status === currentStatus)) {
+  for (const job of trackerJobs.filter((entry) => entry.status === currentStatus)) {
     const card = element('article', undefined, 'card');
     card.append(element('h3', job.title), element('p', job.company));
-    card.append(scoreBadge(job), skillChips(job));
+    card.append(scoreBadge(job), visaBadge(job), skillChips(job));
     card.append(element('p', `${job.portal} · ${job.location || 'Location not listed'}`, 'muted'));
     const hint = alsoOn(job);
     if (hint) card.append(hint);
@@ -372,6 +411,7 @@ $('#run-discovery').addEventListener('click', async () => {
   if (!queries.length || !discoveryProfileVersion) return;
   const version = discoveryProfileVersion;
   const location = rememberLocation();
+  const filters = searchFilters();
   discoveryBusy = true;
   updateDiscoveryControls();
   const lines = [];
@@ -380,7 +420,7 @@ $('#run-discovery').addEventListener('click', async () => {
     for (const [index, query] of queries.entries()) {
       message('#discovery-message', [`Running ${index + 1}/${queries.length}: ${query} — ${location}`, ...lines].join('\n'));
       const result = await api('/discovery/run', jsonRequest('POST', {
-        queries: [query], location, profile_uploaded_at: version,
+        queries: [query], location, profile_uploaded_at: version, ...filters,
       }));
       totalNew += result.new_jobs;
       for (const entry of result.queries) {
@@ -404,7 +444,7 @@ $('#refresh-jobs').addEventListener('click', async () => {
   message('#search-message', 'Fetching Indeed, LinkedIn, and Glassdoor. Please wait…');
   try {
     const result = await api('/refresh-jobs', jsonRequest('POST', {
-      search_term: role, location: rememberLocation(),
+      search_term: role, location: rememberLocation(), ...searchFilters(),
     }));
     message('#search-message', sourceSummary(result.sources));
     await loadJobs();
@@ -438,6 +478,13 @@ $('#score-jobs').addEventListener('click', async (event) => {
 async function initialize() {
   try { $('#location').value = localStorage.getItem('jobmatch.location') || 'USA'; } catch (_) { /* Use USA by default. */ }
   $('#location').addEventListener('change', rememberLocation);
+  try {
+    const hours = localStorage.getItem('jobmatch.hours_old');
+    if (['24', '48', '72', '168', '720', '2160'].includes(hours)) $('#date-range').value = hours;
+    $('#hide-citizen-only').checked = localStorage.getItem('jobmatch.hide_citizen_only') !== 'false';
+  } catch (_) { /* Defaults: 3 days and hide citizen-only roles. */ }
+  $('#date-range').addEventListener('change', saveFilters);
+  $('#hide-citizen-only').addEventListener('change', saveFilters);
   try { renderProfile((await api('/profile')).profile); }
   catch (error) { message('#resume-message', error.message, true); }
   try { await loadJobs(); }

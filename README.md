@@ -38,7 +38,8 @@ resume/job data sent when you explicitly enable OpenAI tools below.
    (see below). For manual search, enter a **Role override** and click
    **Refresh jobs**. Location defaults to `USA`; the browser remembers your last
    location and you can override it before a search. JobSpy queries Indeed, LinkedIn, and Glassdoor
-   separately, requesting 50 results per source from the past 72 hours.
+   separately, requesting 50 results per source for the selected date range
+   (3 days / 72 hours initially).
    Results show per-site counts and warnings. Blocks, empty results, and
    failures on one site do not discard results from working sites. Some sites
    may ignore filters, rate-limit, or return fewer results. USA is the default
@@ -86,7 +87,7 @@ resume/job data sent when you explicitly enable OpenAI tools below.
    recent title(s), up to 15 resume skills, and generated query checkboxes.
    It does not scrape yet. Uncheck any queries, then click **Run discovery**.
    Queries run one at a time with progress, per-site counts/warnings, and the
-   existing last-72-hours/50-results-per-source settings. New jobs are scored
+   selected date range and existing 50-results-per-source setting. New jobs are scored
    automatically on CPU; existing jobs retain their scores and tracking state.
    If scoring cannot load the model, jobs and search history are still saved;
    use **Score all jobs** after resolving model access.
@@ -117,6 +118,34 @@ resume/job data sent when you explicitly enable OpenAI tools below.
    events, and application dates are combined, keeping the furthest recorded
    status. Existing AI outputs are retained; conflicting alternate drafts are
    preserved in the merge event. The keeper's embedding/score remain intact.
+8. **Visa/sponsorship filter:** **Hide US-citizen-only roles** starts ON.
+   Each result and tracker card has a colored badge: red **citizen-only**, green
+   **opt-friendly**, or yellow **unknown**. Classification is recomputed from
+   descriptions during ingestion, and existing descriptions are classified on
+   migration. Red phrases take priority over green phrases, including evidence
+   from merged sources.
+   Red keywords: `us citizen`, `u.s. citizen`, `security clearance`,
+   `must be clearable`, `citizenship required`.
+   Green keywords: `opt`, `stem opt`, `cpt`, `sponsorship`, `h1b`, `h-1b`,
+   `visa sponsor`, `contract`, `c2c`, `corp to corp`. Matches ignore case;
+   short tokens such as OPT/CPT match whole words rather than parts of words.
+   This is a **keyword heuristic only — always verify the actual posting before
+   applying**. A green badge is not a guarantee of sponsorship or eligibility;
+   the heuristic does not interpret negation (for example, “no sponsorship”).
+   Hidden jobs stay in SQLite and can be revealed by switching the toggle off.
+   The toggle also filters the tracker, discovery counts, and discovery's
+   automatic scoring targets; it never deletes application history.
+9. **Date range:** use the dropdown next to Discover/Refresh for **Last 24 hours**,
+   **2 days**, **3 days**, **1 week**, **1 month**, or **3 months**. These map to
+   JobSpy `hours_old` values **24 / 48 / 72 / 168 / 720 / 2160**, respectively,
+   for both manual refresh and each selected discovery query. The browser
+   remembers the range and visa toggle.
+   Some sites ignore `hours_old`. Returned dates are checked locally during
+   ingestion, and the browser also filters saved results by `posted_at` when
+   you change the range. Missing or unparseable dates stay visible because
+   their age cannot be determined. Date-only fields have day precision: the
+   entire cutoff day is included, so an exact hourly cutoff cannot be guaranteed.
+   Date-range changes do not hide older applications in the tracker.
 
 ## Optional OpenAI tools
 
@@ -151,7 +180,8 @@ The tests use isolated temporary SQLite databases and mock external sites,
 OpenAI, and the embedding model; they do not download models, scrape, or send
 your resume anywhere. They cover v1 behavior, migration, scoring/cache reuse,
 skill overlap, AI gating and regeneration, saved letter edits, query building,
-discovery ingestion/auto-scoring, and cross-source merges with preserved tracking data. API documentation
+discovery ingestion/auto-scoring, cross-source merges, visa classification,
+filter precedence, migration backfill, and all six date windows. API documentation
 is available at `/docs` while the server runs.
 
 In the Codex cloud environment, the initial live scrape was blocked by the
