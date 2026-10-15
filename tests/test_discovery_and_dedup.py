@@ -139,7 +139,7 @@ class DiscoveryTests(unittest.TestCase):
             second = self.client.post('/discovery/run', json={'queries': ['SQL analyst']}).json()
             self.assertEqual(second['new_jobs'], 0)
             self.assertEqual(second['scoring']['scored'], 0)
-            self.assertEqual(len(model.calls), 2)  # resume and two new jobs, once
+            self.assertEqual(len(model.calls), 1)  # all missing profile/job components in one batch
         self.assertEqual(len(calls), 9)
         self.assertEqual({item['search_term'] for item in calls[:6]}, {'SQL analyst', 'SAS healthcare'})
         self.assertTrue(all(item['hours_old'] == 72 and item['results_wanted'] == 50 for item in calls))

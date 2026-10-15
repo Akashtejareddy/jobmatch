@@ -7,7 +7,7 @@ let discoveryProfileVersion = null;
 let discoveryBusy = false;
 let currentProfile = null;
 let showHiddenAuth = false;
-const authorizationLevels = { 'US Citizen': 4, 'Green Card': 3, 'H1B or other work visa': 2, 'F-1 STEM OPT': 1, 'F-1 OPT': 1, 'Need sponsorship': 0 };
+const authorizationLevels = { 'US Citizen': 4, 'Green Card': 3, 'H1B or other work visa': 2, 'F-1 STEM OPT': 1, 'F-1 OPT': 1, CPT: 1, 'Need sponsorship': 0 };
 const requiredLevels = { citizen: 4, permanent: 3, authorized: 1, sponsors: 0, unknown: 0 };
 const statuses = ['saved', 'applied', 'interview', 'offer', 'rejected'];
 const transitions = { saved: ['applied'], applied: ['interview', 'rejected'], interview: ['offer', 'rejected'], offer: [], rejected: [] };
@@ -45,7 +45,8 @@ function applyLink(url) {
 }
 function renderProfile(profile) {
   currentProfile = profile;
-  $('#work-authorization').value = profile?.work_authorization || 'F-1 STEM OPT';
+  setAuthorizations(profile?.work_authorization || ['F-1 STEM OPT']);
+  $('#preferred-location').value = profile?.preferred_location || 'USA';
   const years = profile?.parsed?.total_years_experience;
   for (const checkbox of document.querySelectorAll('#experience-filters input')) {
     checkbox.checked = checkbox.value === 'unspecified' || typeof years !== 'number' || !Number.isFinite(years) || years < 0 || checkbox.value === experienceBucket(years);
@@ -117,7 +118,14 @@ function postedTime(value) {
   return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`);
 }
 function authorizationAllowed(job) {
-  return (requiredLevels[job.auth_tier] || 0) <= authorizationLevels[$('#work-authorization').value];
+  const level = Math.max(0, ...selectedAuthorizations().map((value) => authorizationLevels[value]));
+  return (requiredLevels[job.auth_tier] || 0) <= level;
+}
+function selectedAuthorizations() {
+  return [...document.querySelectorAll('#work-authorization input:checked')].map((input) => input.value);
+}
+function setAuthorizations(values) {
+  for (const checkbox of document.querySelectorAll('#work-authorization input')) checkbox.checked = values.includes(checkbox.value);
 }
 function experienceBucket(years) {
   if (years === null || years === undefined) return 'unspecified';
@@ -151,8 +159,24 @@ function alsoOn(job) {
   return names.length ? element('p', `also on ${names.join(', ')}`, 'muted also-on') : null;
 }
 function scoreBadge(job) {
-  return element('span', job.match_score === null ? 'Unscored' : `${job.match_score.toFixed(1)}%`,
+  return element('span', job.match_score === null ? 'Unscored' : `${job.match_score.toFixed(1)}/100`,
     job.match_score === null ? 'score unscored' : 'score');
+}
+function scoreBreakdown(job) {
+  const details = element('details', undefined, 'score-breakdown');
+  details.append(element('summary', 'Score breakdown'));
+  if (!job.score_breakdown) {
+    details.append(element('p', 'Use Score all jobs to calculate the weighted score.', 'muted'));
+    return details;
+  }
+  const labels = { title_similarity: ['Title similarity', 30], skill_coverage: ['Skill coverage', 30],
+    description_similarity: ['Description similarity', 20], experience_fit: ['Experience fit', 10], location_fit: ['Location fit', 10] };
+  const list = element('ul');
+  for (const [key, [label, weight]] of Object.entries(labels)) {
+    list.append(element('li', `${label} (${weight}%): ${job.score_breakdown[key].toFixed(1)}/100`));
+  }
+  details.append(list, element('p', 'Ranks resume-fit, not hiring odds. Missing comparison data uses a neutral 50.', 'muted'));
+  return details;
 }
 function skillChips(job) {
   const container = element('div', undefined, 'skill-chips');
@@ -163,6 +187,11 @@ function skillChips(job) {
     for (const skill of skills) group.append(element('span', skill, 'chip'));
     container.append(group);
   }
+  const mustHaves = element('div', undefined, 'skill-group must-haves');
+  mustHaves.append(element('span', 'missing must-haves: ', 'skill-label'));
+  for (const skill of job.missing_must_haves) mustHaves.append(element('span', skill, 'chip'));
+  if (!job.missing_must_haves.length) mustHaves.append(element('span', 'none detected', 'muted'));
+  container.append(mustHaves);
   return container;
 }
 function renderAIOutputs(job, container, changedKind = null) {
@@ -303,7 +332,7 @@ function renderJobs() {
     title.append(element('p', job.exp_min === null ? 'Experience unspecified' : `Minimum experience: ${job.exp_min} years`, 'muted'));
     title.append(skillChips(job));
     const score = element('td');
-    score.append(scoreBadge(job));
+    score.append(scoreBadge(job), scoreBreakdown(job));
     row.append(title, score);
     const visa = element('td');
     visa.append(authBadge(job));
@@ -351,7 +380,7 @@ function renderTracker() {
   for (const job of trackerJobs.filter((entry) => entry.status === currentStatus)) {
     const card = element('article', undefined, 'card');
     card.append(element('h3', job.title), element('p', job.company));
-    card.append(scoreBadge(job), authBadge(job), skillChips(job));
+    card.append(scoreBadge(job), scoreBreakdown(job), authBadge(job), skillChips(job));
     card.append(element('p', `${job.portal} · ${job.location || 'Location not listed'}`, 'muted'));
     const hint = alsoOn(job);
     if (hint) card.append(hint);
@@ -389,6 +418,8 @@ $('#resume-form').addEventListener('submit', async (event) => {
   button.disabled = true;
   message('#resume-message', 'Reading resume…');
   try {
+    await authorizationSave;
+    await locationSave;
     const body = new FormData();
     body.append('file', $('#resume-file').files[0]);
     const result = await api('/upload', { method: 'POST', body });
@@ -444,6 +475,8 @@ $('#run-discovery').addEventListener('click', async () => {
   const lines = [];
   let totalNew = 0;
   try {
+    await authorizationSave;
+    await locationSave;
     for (const [index, query] of queries.entries()) {
       message('#discovery-message', [`Running ${index + 1}/${queries.length}: ${query} — ${location}`, ...lines].join('\n'));
       const result = await api('/discovery/run', jsonRequest('POST', {
@@ -470,6 +503,7 @@ $('#refresh-jobs').addEventListener('click', async () => {
   updateDiscoveryControls();
   message('#search-message', 'Fetching Indeed, LinkedIn, and Glassdoor. Please wait…');
   try {
+    await authorizationSave;
     const result = await api('/refresh-jobs', jsonRequest('POST', {
       search_term: role, location: rememberLocation(), ...searchFilters(),
     }));
@@ -496,30 +530,60 @@ $('#score-jobs').addEventListener('click', async (event) => {
   button.disabled = true;
   message('#score-message', 'Scoring locally on CPU… First use downloads all-MiniLM-L6-v2; this may take a few minutes.');
   try {
+    await locationSave;
     const result = await api('/score-jobs', { method: 'POST' });
     await loadJobs();
-    message('#score-message', `${result.scored} jobs scored. ${result.embedded} new embeddings; ${result.cached} cached embeddings reused.`);
+    message('#score-message', `${result.scored} jobs scored. ${result.components_embedded || 0} new component embeddings; ${result.components_cached || 0} cached component embeddings reused.`);
   } catch (error) { message('#score-message', error.message, true); }
   finally { button.disabled = false; }
 });
-$('#work-authorization').addEventListener('change', async (event) => {
-  const selector = event.currentTarget;
-  const previous = currentProfile?.work_authorization || 'F-1 STEM OPT';
+let authorizationSave = Promise.resolve();
+let locationSave = Promise.resolve();
+let authorizationRevision = 0;
+$('#work-authorization').addEventListener('change', () => {
+  const values = selectedAuthorizations();
+  const revision = ++authorizationRevision;
   showHiddenAuth = false;
   renderJobs();
   renderTracker();
-  selector.disabled = true;
   message('#authorization-message', 'Saving work authorization…');
-  try {
-    const result = await api('/profile', jsonRequest('PATCH', { work_authorization: selector.value }));
-    currentProfile = result.profile;
-    message('#authorization-message', 'Work authorization saved. Filters updated.');
-  } catch (error) {
-    selector.value = previous;
-    renderJobs();
-    renderTracker();
-    message('#authorization-message', error.message, true);
-  } finally { selector.disabled = false; }
+  // Serialize writes so quick checkbox changes cannot overwrite a newer choice.
+  authorizationSave = authorizationSave.then(async () => {
+    try {
+      const result = await api('/profile', jsonRequest('PATCH', { work_authorization: values }));
+      currentProfile = { ...currentProfile, work_authorization: result.profile.work_authorization };
+      if (revision === authorizationRevision) message('#authorization-message', 'Work authorization saved. Filters updated.');
+    } catch (error) {
+      if (revision !== authorizationRevision) return;
+      setAuthorizations(currentProfile?.work_authorization || ['F-1 STEM OPT']);
+      renderJobs();
+      renderTracker();
+      message('#authorization-message', error.message, true);
+    }
+  });
+});
+$('#preferred-location').addEventListener('change', (event) => {
+  const input = event.currentTarget;
+  const previous = currentProfile?.preferred_location || 'USA';
+  const value = input.value.trim();
+  if (!value) {
+    input.value = previous;
+    message('#location-message', 'Preferred location cannot be blank.', true);
+    return;
+  }
+  input.disabled = true;
+  locationSave = (async () => {
+    try {
+      const result = await api('/profile', jsonRequest('PATCH', { preferred_location: value }));
+      currentProfile = { ...currentProfile, preferred_location: result.profile.preferred_location };
+      input.value = result.profile.preferred_location;
+      await loadJobs();
+      message('#location-message', 'Preferred location saved. Use Score all jobs to update scores.');
+    } catch (error) {
+      input.value = previous;
+      message('#location-message', error.message, true);
+    } finally { input.disabled = false; }
+  })();
 });
 $('#show-auth-hidden').addEventListener('click', () => {
   showHiddenAuth = !showHiddenAuth;

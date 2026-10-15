@@ -18,6 +18,9 @@ class RecordingModel:
     def __init__(self):
         self.calls = []
 
+    def get_sentence_embedding_dimension(self):
+        return 3
+
     def encode(self, texts, **kwargs):
         self.calls.append(list(texts))
         return [[1.0, 0.0, 0.0] if 'sql' in text.lower() else [0.0, 1.0, 0.0] for text in texts]
@@ -95,26 +98,26 @@ class NewFeaturesTests(unittest.TestCase):
         with patch.object(matching, 'get_model', return_value=model):
             result = self.client.post('/score-jobs')
             self.assertEqual(result.status_code, 200)
-            self.assertEqual(result.json(), {'scored': 2, 'embedded': 2, 'cached': 0})
+            self.assertEqual(result.json(), {'scored': 2, 'embedded': 2, 'cached': 0, 'components_embedded': 5, 'components_cached': 0})
             jobs = self.client.get('/jobs').json()['jobs']
-            self.assertEqual([job['match_score'] for job in jobs], [100, 0])
+            self.assertEqual([job['match_score'] for job in jobs], [75, 50])
             self.assertEqual(jobs[0]['id'], analyst['id'])
             self.assertEqual(self.client.post('/score-jobs').json()['cached'], 2)
-            self.assertEqual(len(model.calls), 3)  # resume + two jobs, then resume only
+            self.assertEqual(len(model.calls), 1)  # second scoring uses cached profile and job components
             self.job('3', 'SQL Engineer', 'Build SQL pipelines')
             third = self.client.post('/score-jobs').json()
-            self.assertEqual(third, {'scored': 3, 'embedded': 1, 'cached': 2})
-            self.assertEqual(len(model.calls[-1]), 1)
+            self.assertEqual(third, {'scored': 3, 'embedded': 1, 'cached': 2, 'components_embedded': 2, 'components_cached': 5})
+            self.assertEqual(len(model.calls[-1]), 2)
             self.upload('Tableau dashboards')
             self.assertTrue(all(job['match_score'] is None for job in self.client.get('/jobs').json()['jobs']))
             self.assertEqual(self.client.post('/score-jobs').json()['cached'], 3)
             self.assertEqual(len(model.calls[-1]), 1)  # only changed resume is embedded
             scores = {job['title']: job['match_score'] for job in self.client.get('/jobs').json()['jobs']}
-            self.assertEqual(scores['Chef'], 100)
-            self.assertEqual(scores['SQL Analyst'], 0)
+            self.assertEqual(scores['Chef'], 70)
+            self.assertEqual(scores['SQL Analyst'], 35)
         with main.database() as db:
-            rows = db.execute('SELECT * FROM job_embeddings').fetchall()
-            self.assertEqual(len(rows), 3)
+            rows = db.execute('SELECT * FROM component_embeddings').fetchall()
+            self.assertEqual(len(rows), 8)
             self.assertIsInstance(rows[0]['embedding'], bytes)
             self.assertEqual(rows[0]['model'], matching.MODEL_NAME)
 
@@ -137,7 +140,7 @@ class NewFeaturesTests(unittest.TestCase):
         self.upload()
         job = self.job()
         with main.database() as db:
-            db.execute('INSERT INTO job_embeddings VALUES (?, ?, ?)', (job['id'], b'bad', 'old-model'))
+            db.execute('INSERT INTO component_embeddings VALUES (?, ?, ?, ?)', (*matching.embedding_key('title', job['title']), b'bad'))
         with patch.object(matching, 'get_model', return_value=RecordingModel()):
             self.assertEqual(self.client.post('/score-jobs').json()['embedded'], 1)
 
@@ -161,7 +164,7 @@ class NewFeaturesTests(unittest.TestCase):
         with patch.object(matching, 'get_model', return_value=model), patch.object(matching, 'encode', side_effect=encode_and_change_resume):
             self.assertEqual(self.client.post('/score-jobs').status_code, 409)
         with main.database() as db:
-            self.assertEqual(db.execute('SELECT count(*) FROM job_embeddings').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM component_embeddings').fetchone()[0], 0)
 
     def test_skill_keywords_aliases_word_boundaries_and_custom_skills(self):
         skills = matching.profile_skills({'raw_text': 'SQL sql SQL Python Tableau and research'})

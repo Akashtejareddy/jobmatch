@@ -74,6 +74,9 @@ def merge_rows(db, keeper, duplicate, timestamp):
     db.execute("UPDATE jobs SET status = ?, applied_at = ?, notes = ? WHERE id = ?",
                (status, min(dates) if dates else None, "\n\n".join(notes), keeper["id"]))
     current = db.execute("SELECT * FROM jobs WHERE id = ?", (keeper["id"],)).fetchone()
+    db.execute("UPDATE jobs SET match_score = NULL, score_breakdown = NULL "
+               "WHERE id = ? AND exp_min IS NOT ? AND score_breakdown IS NOT NULL",
+               (keeper["id"], experience_for_job(current["description"], aliases(current))))
     db.execute("UPDATE jobs SET auth_tier = ?, exp_min = ? WHERE id = ?",
                (auth_tier_for_job(current["description"], aliases(current)),
                 experience_for_job(current["description"], aliases(current)), keeper["id"]))

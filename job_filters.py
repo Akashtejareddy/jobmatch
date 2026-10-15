@@ -1,15 +1,16 @@
 """Local work-authorization, experience, and posting-date heuristics."""
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 HourWindow = Literal[24, 48, 72, 168, 720, 2160]
-WorkAuthorization = Literal["US Citizen", "Green Card", "H1B or other work visa", "F-1 STEM OPT", "F-1 OPT", "Need sponsorship"]
+WorkAuthorization = Literal["US Citizen", "Green Card", "H1B or other work visa", "F-1 STEM OPT", "F-1 OPT", "CPT", "Need sponsorship"]
 ExperienceBucket = Literal["0-3", "3-6", "6-10", "10+", "unspecified"]
 DEFAULT_AUTHORIZATION = "F-1 STEM OPT"
 USER_LEVELS = {"US Citizen": 4, "Green Card": 3, "H1B or other work visa": 2,
-               "F-1 STEM OPT": 1, "F-1 OPT": 1, "Need sponsorship": 0}
+               "F-1 STEM OPT": 1, "F-1 OPT": 1, "CPT": 1, "Need sponsorship": 0}
 REQUIRED_LEVELS = {"citizen": 4, "permanent": 3, "authorized": 1, "sponsors": 0, "unknown": 0}
 AUTH_KEYWORDS = {
     "citizen": ("us citizen", "u.s. citizen", "security clearance", "clearable"),
@@ -45,8 +46,23 @@ def auth_tier_for_job(description, aliases=()):
     return next((tier for tier in ("citizen", "permanent", "authorized", "sponsors") if tier in tiers), "unknown")
 
 
+def authorization_list(value):
+    """Read both legacy single values and the new JSON list representation."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = [value]
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        value = [DEFAULT_AUTHORIZATION]
+    return list(dict.fromkeys(item for item in value if isinstance(item, str) and item in USER_LEVELS))
+
+
 def auth_allowed(tier, authorization):
-    return REQUIRED_LEVELS.get(tier, 0) <= USER_LEVELS[authorization]
+    level = max((USER_LEVELS[item] for item in authorization_list(authorization)), default=0)
+    return REQUIRED_LEVELS.get(tier, 0) <= level
 
 
 EXPERIENCE_PATTERN = re.compile(

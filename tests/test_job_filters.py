@@ -73,7 +73,7 @@ class JobFilterTests(unittest.TestCase):
         main.init_db()
         main.init_db()
         profile = self.client.get('/profile').json()['profile']
-        self.assertEqual(profile['work_authorization'], 'F-1 STEM OPT')
+        self.assertEqual(profile['work_authorization'], ['F-1 STEM OPT'])
         self.assertIn('Existing resume', profile['raw_text'])
         jobs = self.client.get('/jobs').json()['jobs']
         self.assertEqual(len(jobs), 1)
@@ -105,26 +105,26 @@ class JobFilterTests(unittest.TestCase):
                     self.assertEqual(job_filters.auth_allowed(tier, authorization), tier in tiers)
 
     def test_profile_setting_can_precede_resume_and_survives_reuploads(self):
-        self.assertEqual(self.client.patch('/profile', json={'work_authorization': 'Green Card'}).status_code, 200)
-        self.assertEqual(self.client.get('/profile').json()['profile']['work_authorization'], 'Green Card')
+        self.assertEqual(self.client.patch('/profile', json={'work_authorization': ['Green Card']}).status_code, 200)
+        self.assertEqual(self.client.get('/profile').json()['profile']['work_authorization'], ['Green Card'])
         for name in ('First resume', 'Second resume'):
             result = self.client.post('/upload', files={'file': ('resume.pdf', test_app.resume_pdf(name), 'application/pdf')})
             self.assertEqual(result.status_code, 200)
-            self.assertEqual(result.json()['profile']['work_authorization'], 'Green Card')
+            self.assertEqual(result.json()['profile']['work_authorization'], ['Green Card'])
             self.assertIn(name, result.json()['profile']['raw_text'])
         self.assertEqual(self.client.patch('/profile', json={'work_authorization': 'invalid'}).status_code, 422)
-        self.assertEqual(self.client.get('/profile').json()['profile']['work_authorization'], 'Green Card')
+        self.assertEqual(self.client.get('/profile').json()['profile']['work_authorization'], ['Green Card'])
 
     def test_setting_change_does_not_scrape_or_clear_existing_resume_scores_or_drafts(self):
         result = self.client.post('/upload', files={'file': ('resume.pdf', test_app.resume_pdf(), 'application/pdf')}).json()
-        self.assertEqual(result['profile']['work_authorization'], 'F-1 STEM OPT')
+        self.assertEqual(result['profile']['work_authorization'], ['F-1 STEM OPT'])
         version = result['profile']['uploaded_at']
         job = self.job('No sponsorship. 3-5 years experience.')
         with main.database() as db:
             db.execute('UPDATE jobs SET match_score = 88 WHERE id = ?', (job['id'],))
             db.execute('INSERT INTO job_ai VALUES (?, ?, ?, ?)', (job['id'], 'cover_letter', '"My draft"', main.now()))
         with patch('jobspy.scrape_jobs') as scrape:
-            self.client.patch('/profile', json={'work_authorization': 'US Citizen'})
+            self.client.patch('/profile', json={'work_authorization': ['US Citizen']})
             scrape.assert_not_called()
         self.assertEqual(self.client.get('/profile').json()['profile']['uploaded_at'], version)
         stored = self.client.get('/jobs').json()['jobs'][0]

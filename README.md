@@ -61,18 +61,55 @@ resume/job data sent when you explicitly enable OpenAI tools below.
    `.cache/models/` for offline reuse. Only model files are downloaded; resume
    and job text are embedded locally. The first installation/download is larger
    because sentence-transformers includes PyTorch.
-   Scores are cosine similarity × 100, clipped to 0–100. Rows default to highest
-   score first, with unscored jobs last. Very long inputs are truncated at the
-   model's token limit.
-   `job_embeddings` caches each job's embedding; repeat scoring embeds only the
-   current resume and new/changed jobs. Changing a title or description clears
-   that job's cached embedding and score. Re-uploading a resume clears scores
-   but reuses job embeddings on the next scoring run.
+   Scores are a weighted 0–100 composite:
+
+   | Component | Weight | Sub-score (0–100) |
+   | --- | --- | --- |
+   | Title similarity | 30% | Cosine of the most recent resume title and job title × 100 |
+   | Skill coverage | 30% | Matched profile skills ÷ min(recognized posting skills, 12) × 100, capped at 100 |
+   | Description similarity | 20% | Cosine of full extracted resume text and job description × 100 |
+   | Experience fit | 10% | 100 for unspecified requirements or a gap ≤ 2 years; linear decline to 0 at a gap ≥ 5 years |
+   | Location fit | 10% | 100 for remote or a preferred-location match; 50 for unknown; 0 for an identified different country |
+
+   Expand **Score breakdown** on a result or tracker card to see all five
+   sub-scores and weights. Cosines are clipped to 0–100. Scores rank
+   **resume-fit, not hiring odds**. Long text is truncated at the model's token
+   limit; title detection, keyword coverage, and location rules are heuristics.
+   Titles reuse the discovery detector: first parsed role, otherwise a title
+   near a date range. A missing title/description, no recognized posting skills,
+   or unknown candidate experience (when required years exist) uses a neutral 50.
+   Experience uses parsed `total_years_experience`; the penalty applies symmetrically
+   to under/overqualification, reaching 0 when a job needs 5+ years more.
+   Choose **Preferred location** in the Resume section (default **USA**, saved
+   with the profile). It is separate from the existing search-location box.
+   Matching uses whole location phrases, common country aliases, and basic US
+   city/state recognition; it does not geocode. An unmatched city or unrecognized
+   country gets 50. Remote detection ignores common negations but cannot reliably
+   interpret geographic restrictions on remote work. Changing this preference
+   clears scores; click **Score all jobs** to recalculate.
+
+   Rows default to highest score first, with unscored jobs last. Existing cosine
+   scores are replaced on the next **Score all jobs**; older badges have no
+   breakdown until then. `component_embeddings` caches title and description
+   vectors separately, keyed by component, text hash, and model. Identical inputs
+   share vectors, including profile and job titles. Re-scoring embeds only missing,
+   changed, or invalid components; unchanged profile vectors are also reused.
+   Editing a job title, description, location, or extracted experience clears its
+   score. Re-uploading a resume clears scores but retains reusable vectors.
+   The legacy `job_embeddings` table is preserved; its combined-text vectors
+   cannot be reused for the separate components. No additional model is needed.
+
    Skill chips use the AI-parsed `skills` list when available, otherwise up to
    30 frequent tech keywords from the resume. **Matched** means a resume skill
    appears in the job description; **missing** means a recognized job-description
-   tech skill is absent from the resume skill list. Matching ignores case and
-   uses whole keywords plus common aliases. It does not call an LLM.
+   tech skill is absent from the resume skill list. **Missing must-haves** is a
+   separate list restricted to skills in explicit required/minimum qualification
+   sections or clauses saying must/required/essential; preferred/optional clauses
+   are excluded. No detected missing must-haves does not prove qualification.
+   Matching ignores case and uses whole keywords plus common aliases and custom
+   profile skills. Unlisted skills, ambiguous section boundaries, negation, and
+   keyword mentions without proficiency can distort coverage and requirements.
+   These checks do not call an LLM. Always review the actual posting.
 5. **AI fit kit:** expand **AI fit kit** on any job row for **Fit report**
    (3–4 sentences: strengths, gaps, verdict), **Tailor bullets** (up to the first
    five existing resume bullets, returned as a list), and **Cover letter**
@@ -117,13 +154,17 @@ resume/job data sent when you explicitly enable OpenAI tools below.
    duplicate rows are consolidated on the next ingestion; tracker notes,
    events, and application dates are combined, keeping the furthest recorded
    status. Existing AI outputs are retained; conflicting alternate drafts are
-   preserved in the merge event. The keeper's embedding/score remain intact.
-8. **Work authorization:** choose **My work authorization** in the Resume section.
-   It defaults to **F-1 STEM OPT**, is stored on the profile, and survives resume
-   re-uploads. Changing it immediately re-filters saved jobs without scraping,
+   preserved in the merge event. The keeper's vectors remain reusable; changed
+   experience requirements clear its score for recalculation.
+8. **Work authorization:** check **My work authorization** in the Resume section;
+   **select all that apply to you**. The default is **F-1 STEM OPT**. Selections
+   are stored as a list on the profile and survive resume re-uploads. Existing
+   single settings migrate to one-item lists without losing resume/tracker data.
+   Changing selections immediately re-filters saved jobs without scraping,
    changing resume data, clearing scores, or deleting application history.
    Levels are US Citizen **4**, Green Card **3**, H1B or other work visa **2**,
-   F-1 STEM OPT / F-1 OPT **1**, and Need sponsorship **0**.
+   F-1 STEM OPT / F-1 OPT / CPT **1**, and Need sponsorship **0**. The highest
+   selected level applies; no selections use level 0.
    Each result and tracker card has a badge derived from description keywords:
    **citizen** (red, requires 4): `us citizen`, `u.s. citizen`, `security clearance`, `clearable`;
    **permanent** (orange, requires 3): `green card`, `permanent resident`,
@@ -135,7 +176,7 @@ resume/job data sent when you explicitly enable OpenAI tools below.
    `visa sponsorship`; **unknown** (yellow): no matching rule.
    Matches ignore case. Restrictive tiers win in the order citizen → permanent
    → authorized → sponsors → unknown, including evidence from merged sources.
-   Jobs requiring a higher level than yours are hidden. Sponsors and unknown
+   Jobs requiring a higher level than your highest selection are hidden. Sponsors and unknown
    always pass the authorization filter; date and experience filters still apply.
    **Show N hidden** temporarily reveals authorization-filtered roles within
    the selected result filters without changing your profile setting. Authorization
@@ -207,7 +248,8 @@ OpenAI, and the embedding model; they do not download models, scrape, or send
 your resume anywhere. They cover v1 behavior, migration, scoring/cache reuse,
 skill overlap, AI gating and regeneration, saved letter edits, query building,
 discovery ingestion/auto-scoring, cross-source merges, authorization levels,
-profile settings, experience extraction/buckets, and all six date windows. API documentation
+profile list migration and settings, composite score weights/component caching,
+missing must-haves, experience extraction/buckets, and all six date windows. API documentation
 is available at `/docs` while the server runs.
 
 In the Codex cloud environment, the initial live scrape was blocked by the

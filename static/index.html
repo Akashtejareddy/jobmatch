@@ -12,17 +12,22 @@
   <main class="container">
     <section aria-labelledby="resume-title">
       <h2 id="resume-title">1. Resume</h2>
-      <label class="authorization-setting">My work authorization
-        <select id="work-authorization">
-          <option>US Citizen</option>
-          <option>Green Card</option>
-          <option>H1B or other work visa</option>
-          <option selected>F-1 STEM OPT</option>
-          <option>F-1 OPT</option>
-          <option>Need sponsorship</option>
-        </select>
-      </label>
+      <fieldset id="work-authorization" class="authorization-setting" aria-describedby="authorization-hint">
+        <legend>My work authorization</legend>
+        <p id="authorization-hint" class="muted">select all that apply to you</p>
+        <label><input type="checkbox" value="US Citizen"> US Citizen</label>
+        <label><input type="checkbox" value="Green Card"> Green Card</label>
+        <label><input type="checkbox" value="H1B or other work visa"> H1B or other work visa</label>
+        <label><input type="checkbox" value="F-1 STEM OPT" checked> F-1 STEM OPT</label>
+        <label><input type="checkbox" value="F-1 OPT"> F-1 OPT</label>
+        <label><input type="checkbox" value="CPT"> CPT</label>
+        <label><input type="checkbox" value="Need sponsorship"> Need sponsorship</label>
+      </fieldset>
       <p id="authorization-message" class="message" role="status"></p>
+      <label class="preferred-location-setting">Preferred location
+        <input id="preferred-location" value="USA" maxlength="200" required>
+      </label>
+      <p id="location-message" class="message" role="status"></p>
       <form id="resume-form">
         <label>PDF resume <input type="file" id="resume-file" accept="application/pdf,.pdf" required></label>
         <button type="submit">Parse</button>

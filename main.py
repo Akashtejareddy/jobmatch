@@ -23,7 +23,7 @@ import discovery
 import deduplication
 from fit_kit import ENABLE_MESSAGE, generate_fit_kit
 from job_filters import (HourWindow, WorkAuthorization, ExperienceBucket, DEFAULT_AUTHORIZATION,
-                         auth_tier_for_job, auth_allowed, experience_for_job, experience_allowed, within_date_range)
+                         authorization_list, auth_tier_for_job, auth_allowed, experience_for_job, experience_allowed, within_date_range)
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "jobs.db"
@@ -102,6 +102,13 @@ def init_db():
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (job_id, kind)
             );
+            CREATE TABLE IF NOT EXISTS component_embeddings (
+                component TEXT NOT NULL,
+                input_hash TEXT NOT NULL,
+                model TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                PRIMARY KEY (component, input_hash, model)
+            );
             CREATE TABLE IF NOT EXISTS search_queries (
                 id INTEGER PRIMARY KEY,
                 query TEXT NOT NULL,
@@ -121,8 +128,15 @@ def init_db():
             db.execute("ALTER TABLE jobs ADD COLUMN auth_tier TEXT")
         if "exp_min" not in columns:
             db.execute("ALTER TABLE jobs ADD COLUMN exp_min REAL")
+        if "score_breakdown" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN score_breakdown TEXT")
         if "work_authorization" not in {row["name"] for row in db.execute("PRAGMA table_info(profile)")}:
-            db.execute("ALTER TABLE profile ADD COLUMN work_authorization TEXT NOT NULL DEFAULT 'F-1 STEM OPT'")
+            db.execute("ALTER TABLE profile ADD COLUMN work_authorization TEXT NOT NULL DEFAULT '[\"F-1 STEM OPT\"]'")
+        if "preferred_location" not in {row["name"] for row in db.execute("PRAGMA table_info(profile)")}:
+            db.execute("ALTER TABLE profile ADD COLUMN preferred_location TEXT NOT NULL DEFAULT 'USA'")
+        for row in db.execute("SELECT id, work_authorization FROM profile").fetchall():
+            db.execute("UPDATE profile SET work_authorization = ? WHERE id = ?",
+                       (json.dumps(authorization_list(row["work_authorization"])), row["id"]))
 
 
 @asynccontextmanager
@@ -216,20 +230,36 @@ def get_profile():
         return {"profile": None}
     result = dict(row)
     result["parsed"] = json.loads(result.pop("parsed_json")) if row["parsed_json"] else None
+    result["work_authorization"] = authorization_list(row["work_authorization"])
     return {"profile": result}
 
 
 class ProfileSettings(BaseModel):
-    work_authorization: WorkAuthorization
+    work_authorization: list[WorkAuthorization] | None = None
+    preferred_location: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("preferred_location")
+    @classmethod
+    def trim_location(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("Preferred location cannot be blank.")
+        return value.strip() if value is not None else None
 
 
 @app.patch("/profile")
 def update_profile_settings(request: ProfileSettings):
     with database() as db:
         # A setting can be saved before the first resume, without inventing resume data.
-        db.execute("INSERT INTO profile (id, raw_text, filename, uploaded_at, work_authorization) "
-                   "VALUES (1, '', '', '', ?) ON CONFLICT(id) DO UPDATE SET "
-                   "work_authorization = excluded.work_authorization", (request.work_authorization,))
+        db.execute("INSERT OR IGNORE INTO profile (id, raw_text, filename, uploaded_at, work_authorization) "
+                   "VALUES (1, '', '', '', ?)", (json.dumps([DEFAULT_AUTHORIZATION]),))
+        if request.work_authorization is not None:
+            db.execute("UPDATE profile SET work_authorization = ? WHERE id = 1",
+                       (json.dumps(authorization_list(request.work_authorization)),))
+        if request.preferred_location is not None:
+            previous = db.execute("SELECT preferred_location FROM profile WHERE id = 1").fetchone()[0]
+            if previous != request.preferred_location:
+                db.execute("UPDATE jobs SET match_score = NULL, score_breakdown = NULL")
+            db.execute("UPDATE profile SET preferred_location = ? WHERE id = 1", (request.preferred_location,))
     return get_profile()
 
 
@@ -262,13 +292,13 @@ def upload(file: UploadFile = File(...)):
         warning = "No API key in .env. Extracted text saved without AI parsing."
     with database() as db:
         db.execute(
-            "INSERT INTO profile (id, raw_text, parsed_json, filename, uploaded_at) VALUES (1, ?, ?, ?, ?) "
+            "INSERT INTO profile (id, raw_text, parsed_json, filename, uploaded_at, work_authorization) VALUES (1, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET raw_text = excluded.raw_text, parsed_json = excluded.parsed_json, "
             "filename = excluded.filename, uploaded_at = excluded.uploaded_at",
             (text, json.dumps(parsed) if parsed is not None else None,
-             file.filename or "resume.pdf", now()),
+             file.filename or "resume.pdf", now(), json.dumps([DEFAULT_AUTHORIZATION])),
         )
-        db.execute("UPDATE jobs SET match_score = NULL")
+        db.execute("UPDATE jobs SET match_score = NULL, score_breakdown = NULL")
         db.execute("DELETE FROM job_ai")
     return {**get_profile(), "warning": warning}
 
@@ -310,6 +340,9 @@ def store_job(job):
                 deduplication.add_alias(db, alias, job)
                 row = db.execute("SELECT * FROM jobs WHERE id = ?", (alias["id"],)).fetchone()
                 entries = deduplication.aliases(row)
+                db.execute("UPDATE jobs SET match_score = NULL, score_breakdown = NULL "
+                           "WHERE id = ? AND exp_min IS NOT ? AND score_breakdown IS NOT NULL",
+                           (alias["id"], experience_for_job(row["description"], entries)))
                 db.execute("UPDATE jobs SET fetched_at = ?, auth_tier = ?, exp_min = ? WHERE id = ?",
                            (job["fetched_at"], auth_tier_for_job(row["description"], entries),
                             experience_for_job(row["description"], entries), alias["id"]))
@@ -330,7 +363,8 @@ def store_job(job):
                          (job["source"], job["source_id_or_url"])).fetchone()
         if existing and any(existing[key] != row[key] for key in ("title", "description")):
             db.execute("DELETE FROM job_embeddings WHERE job_id = ?", (row["id"],))
-            db.execute("UPDATE jobs SET match_score = NULL WHERE id = ?", (row["id"],))
+        if existing and any(existing[key] != row[key] for key in ("title", "description", "location", "exp_min")):
+            db.execute("UPDATE jobs SET match_score = NULL, score_breakdown = NULL WHERE id = ?", (row["id"],))
         if existing and any(existing[key] != row[key] for key in ("title", "description", "company", "location")):
             db.execute("DELETE FROM job_ai WHERE job_id = ?", (row["id"],))
         row = db.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
@@ -441,6 +475,9 @@ def refresh_job_requirements(db):
     # Reclassify stored jobs on ingestion, including jobs not returned this time.
     for row in db.execute("SELECT id, description, also_on FROM jobs").fetchall():
         entries = json.loads(row["also_on"])
+        db.execute("UPDATE jobs SET match_score = NULL, score_breakdown = NULL "
+                   "WHERE id = ? AND exp_min IS NOT ? AND score_breakdown IS NOT NULL",
+                   (row["id"], experience_for_job(row["description"], entries)))
         db.execute("UPDATE jobs SET auth_tier = ?, exp_min = ? WHERE id = ?",
                    (auth_tier_for_job(row["description"], entries), experience_for_job(row["description"], entries), row["id"]))
 
@@ -645,6 +682,8 @@ def get_jobs():
             if row["applied_at"] else None
         )
         job["skill_overlap"] = matching.skill_overlap(skills, row["description"]) if profile else {"matched": [], "missing": []}
+        job["missing_must_haves"] = matching.missing_must_haves(skills, row["description"]) if profile else []
+        job["score_breakdown"] = json.loads(row["score_breakdown"]) if row["score_breakdown"] else None
         job["ai"] = outputs.get(row["id"], {})
         jobs.append(job)
     return {"jobs": jobs, "ai_enabled": bool(read_api_key()), "ai_message": ENABLE_MESSAGE}
@@ -663,51 +702,99 @@ def score_matching_jobs(job_ids=None, profile_uploaded_at=None):
         if profile_uploaded_at and profile_uploaded_at != profile["uploaded_at"]:
             raise HTTPException(409, "Resume changed during discovery. Score again using your current resume.")
         with database() as db:
-            where = " WHERE jobs.id IN (" + ",".join("?" for _ in job_ids) + ")" if job_ids else ""
-            jobs = [dict(row) for row in db.execute(
-                "SELECT jobs.*, job_embeddings.embedding, job_embeddings.model "
-                "FROM jobs LEFT JOIN job_embeddings ON jobs.id = job_embeddings.job_id" + where, job_ids or [],
-            )]
+            where = " WHERE id IN (" + ",".join("?" for _ in job_ids) + ")" if job_ids else ""
+            jobs = [dict(row) for row in db.execute("SELECT * FROM jobs" + where, job_ids or [])]
         if not jobs:
             return {"scored": 0, "embedded": 0, "cached": 0}
-        try:
-            model = matching.get_model()
-            resume_vector = matching.encode(model, [matching.profile_text(profile)])[0]
-            vectors = {}
-            pending = []
-            for job in jobs:
+        titles, _ = discovery.detect_titles(profile)
+        resume_title = titles[0] if titles else ""
+        resume_text = profile.get("raw_text", "").strip() or matching.profile_text(profile)
+        skills = matching.profile_skills(profile)
+        inputs = {}
+
+        def register(component, text):
+            text = text.strip()
+            if not text:
+                return None
+            key = matching.embedding_key(component, text)
+            inputs[key] = text
+            return key
+
+        resume_keys = (register("title", resume_title), register("description", resume_text))
+        job_keys = {job["id"]: (register("title", job["title"]), register("description", job["description"]))
+                    for job in jobs}
+        vectors, pending = {}, []
+        with database() as db:
+            for key in inputs:
+                entry = db.execute("SELECT embedding FROM component_embeddings "
+                                   "WHERE component = ? AND input_hash = ? AND model = ?", key).fetchone()
                 try:
-                    vector = matching.unpack_embedding(job["embedding"])
-                    if job["model"] != matching.MODEL_NAME or len(vector) != len(resume_vector):
-                        raise ValueError("Outdated embedding")
-                    vectors[job["id"]] = vector
+                    vectors[key] = matching.unpack_embedding(entry["embedding"] if entry else None)
                 except (ValueError, TypeError):
-                    pending.append(job)
+                    pending.append(key)
+        initially_cached = len(vectors)
+        try:
+            model = None
             if pending:
-                encoded = matching.encode(model, [f"{job['title']}\n{job['description']}" for job in pending])
-                vectors.update({job["id"]: vector for job, vector in zip(pending, encoded)})
-            scores = {job["id"]: matching.match_score(resume_vector, vectors[job["id"]]) for job in jobs}
+                model = matching.get_model()
+                encoded = matching.encode(model, [inputs[key] for key in pending])
+                vectors.update(zip(pending, encoded, strict=True))
+            # Repair incompatible cached dimensions without re-embedding valid inputs.
+            dimension = len(vectors[pending[0]]) if pending else len(vectors[resume_keys[1]])
+            if not pending and any(len(vector) != dimension for vector in vectors.values()):
+                model = matching.get_model()
+                dimension = model.get_sentence_embedding_dimension()
+            invalid = [key for key in vectors if len(vectors[key]) != dimension]
+            if invalid:
+                model = model or matching.get_model()
+                vectors.update(zip(invalid, matching.encode(model, [inputs[key] for key in invalid]), strict=True))
+                pending.extend(invalid)
+                initially_cached -= len(invalid)
+            for vector in vectors.values():
+                matching.unpack_embedding(matching.pack_embedding(vector))
+                if len(vector) != dimension:
+                    raise ValueError("Embedding dimensions differ")
+
+            def similarity(left, right):
+                return matching.match_score(vectors[left], vectors[right]) if left and right else 50.0
+
+            breakdowns = {}
+            for job in jobs:
+                title_key, description_key = job_keys[job["id"]]
+                exp_min = job["exp_min"] if job["exp_min"] is not None else experience_for_job(
+                    job["description"], json.loads(job["also_on"]))
+                breakdowns[job["id"]] = {
+                    "title_similarity": similarity(resume_keys[0], title_key),
+                    "skill_coverage": matching.skill_coverage(skills, job["description"]),
+                    "description_similarity": similarity(resume_keys[1], description_key),
+                    "experience_fit": matching.experience_fit(exp_min, (profile.get("parsed") or {}).get("total_years_experience")),
+                    "location_fit": matching.location_fit(job["location"], profile["preferred_location"], job["description"]),
+                }
         except Exception:
             logger.exception("Local match scoring failed")
             raise HTTPException(503, "Local scoring could not load or run all-MiniLM-L6-v2. "
                                 "On first use, allow Hugging Face model downloads and try again. See server logs.")
         with database() as db:
             db.execute("BEGIN IMMEDIATE")
-            current = db.execute("SELECT uploaded_at FROM profile WHERE id = 1").fetchone()
-            if not current or current["uploaded_at"] != profile["uploaded_at"]:
-                raise HTTPException(409, "Resume changed during scoring. Please score again.")
+            current = db.execute("SELECT uploaded_at, preferred_location FROM profile WHERE id = 1").fetchone()
+            if not current or any(current[key] != profile[key] for key in ("uploaded_at", "preferred_location")):
+                raise HTTPException(409, "Resume or preferred location changed during scoring. Please score again.")
             # Do not write results computed from a job that changed mid-request.
+            checked_fields = ("title", "description", "location", "exp_min", "also_on")
             for job in jobs:
-                current_job = db.execute("SELECT title, description FROM jobs WHERE id = ?", (job["id"],)).fetchone()
-                if not current_job or any(current_job[key] != job[key] for key in ("title", "description")):
+                current_job = db.execute("SELECT * FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+                if not current_job or any(current_job[key] != job[key] for key in checked_fields):
                     raise HTTPException(409, "Jobs changed during scoring. Please score again.")
-            for job in pending:
-                db.execute("INSERT INTO job_embeddings (job_id, embedding, model) VALUES (?, ?, ?) "
-                           "ON CONFLICT(job_id) DO UPDATE SET embedding = excluded.embedding, model = excluded.model",
-                           (job["id"], matching.pack_embedding(vectors[job["id"]]), matching.MODEL_NAME))
-            db.executemany("UPDATE jobs SET match_score = ? WHERE id = ?",
-                           [(score, job_id) for job_id, score in scores.items()])
-        return {"scored": len(jobs), "embedded": len(pending), "cached": len(jobs) - len(pending)}
+            for key in pending:
+                db.execute("INSERT INTO component_embeddings (component, input_hash, model, embedding) VALUES (?, ?, ?, ?) "
+                           "ON CONFLICT(component, input_hash, model) DO UPDATE SET embedding = excluded.embedding",
+                           (*key, matching.pack_embedding(vectors[key])))
+            db.executemany("UPDATE jobs SET match_score = ?, score_breakdown = ? WHERE id = ?",
+                           [(matching.composite_score(parts), json.dumps(parts), job_id)
+                            for job_id, parts in breakdowns.items()])
+        embedded = sum(any(key in pending for key in keys if key) for keys in job_keys.values())
+        return {"scored": len(jobs), "embedded": embedded, "cached": len(jobs) - embedded,
+                "components_embedded": len(pending), "components_cached": initially_cached}
     finally:
         matching.SCORING_LOCK.release()
 
