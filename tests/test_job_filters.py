@@ -253,6 +253,22 @@ class JobFilterTests(unittest.TestCase):
                 self.assertEqual(self.client.post('/discovery/run', json={'queries': ['SQL'], 'hours_old': hours}).status_code, 422)
             scrape.assert_not_called()
 
+    def test_numeric_text_ranges_are_accepted_without_allowing_new_ranges(self):
+        with patch.object(main, 'ingest_jobs', return_value={'sources': [], 'new_job_ids': [], 'job_ids': []}) as ingest:
+            for hours in (24, 48, 72, 168, 720, 2160):
+                for endpoint, payload in (('/refresh-jobs', {'search_term': 'data analyst', 'location': 'USA'}),
+                                          ('/discovery/run', {'queries': ['data analyst']})):
+                    with self.subTest(hours=hours, endpoint=endpoint):
+                        if endpoint == '/discovery/run':
+                            # Discovery requires a stored readable resume.
+                            self.client.post('/upload', files={'file': ('resume.pdf', test_app.resume_pdf('SQL Analyst'), 'application/pdf')})
+                        response = self.client.post(endpoint, json={**payload, 'hours_old': str(hours)})
+                        self.assertEqual(response.status_code, 200, response.text)
+                        self.assertEqual(ingest.call_args.args[2], hours)
+                        self.assertIsInstance(ingest.call_args.args[2], int)
+            for value in ('0', '25', '72.5', 'all', ''):
+                self.assertEqual(self.client.post('/refresh-jobs', json={'hours_old': value}).status_code, 422)
+
 
 if __name__ == '__main__':
     unittest.main()

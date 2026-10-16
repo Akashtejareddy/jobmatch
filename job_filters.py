@@ -3,9 +3,19 @@
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 
-HourWindow = Literal[24, 48, 72, 168, 720, 2160]
+from pydantic import BeforeValidator
+
+
+def normalize_hours(value):
+    # HTML selects and older clients may serialize an otherwise valid range as text.
+    if isinstance(value, str) and value.strip().isdecimal():
+        return int(value.strip())
+    return value
+
+
+HourWindow = Annotated[Literal[24, 48, 72, 168, 720, 2160], BeforeValidator(normalize_hours)]
 WorkAuthorization = Literal["US Citizen", "Green Card", "H1B or other work visa", "F-1 STEM OPT", "F-1 OPT", "CPT", "Need sponsorship"]
 ExperienceBucket = Literal["0-3", "3-6", "6-10", "10+", "unspecified"]
 DEFAULT_AUTHORIZATION = "F-1 STEM OPT"

@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import logging
@@ -13,7 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pypdf import PdfReader
@@ -151,7 +152,13 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 @app.get("/", include_in_schema=False)
 def index():
-    return FileResponse(ROOT / "static" / "index.html")
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    # Updated HTML must request matching assets after a git pull, even if a
+    # browser has cached an earlier script with a different request format.
+    for filename in ("app.js", "style.css"):
+        version = hashlib.sha256((ROOT / "static" / filename).read_bytes()).hexdigest()[:12]
+        html = html.replace(f'"/static/{filename}"', f'"/static/{filename}?v={version}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 class Role(BaseModel):

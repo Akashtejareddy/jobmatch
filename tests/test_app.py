@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,6 +63,24 @@ class AppTests(unittest.TestCase):
 
     def upload(self, text="Jane Analyst"):
         return self.client.post("/upload", files={"file": ("resume.pdf", resume_pdf(text), "application/pdf")})
+
+    def test_home_revalidates_and_asset_urls_change_when_scripts_change(self):
+        static = Path(self.temp.name) / 'static'
+        static.mkdir()
+        static.joinpath('index.html').write_text(
+            Path(main.__file__).with_name('static').joinpath('index.html').read_text(encoding='utf-8'), encoding='utf-8')
+        static.joinpath('app.js').write_text('first script', encoding='utf-8')
+        static.joinpath('style.css').write_text('same styles', encoding='utf-8')
+        first = self.client.get('/')
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.headers['cache-control'], 'no-cache')
+        first_script = re.search(r'src="([^"]+)"', first.text)[1]
+        first_style = re.search(r'href="([^"]+)"', first.text)[1]
+        self.assertTrue(first_script.startswith('/static/app.js?v='))
+        static.joinpath('app.js').write_text('updated script', encoding='utf-8')
+        second = self.client.get('/')
+        self.assertNotEqual(re.search(r'src="([^"]+)"', second.text)[1], first_script)
+        self.assertEqual(re.search(r'href="([^"]+)"', second.text)[1], first_style)
 
     def add_job(self, url="https://boards.greenhouse.io/example/jobs/123"):
         response = httpx.Response(200, text=HTML, request=httpx.Request("GET", url))

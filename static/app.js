@@ -24,10 +24,24 @@ function message(selector, text, error = false) {
   node.textContent = text || '';
   node.classList.toggle('error', error);
 }
+function apiErrorMessage(detail) {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    const labels = { search_term: 'Role override', location: 'Location', hours_old: 'Date range',
+      experience_buckets: 'Experience filter', work_authorization: 'Work authorization',
+      preferred_location: 'Preferred location', queries: 'Search queries', file: 'PDF resume' };
+    const errors = detail.map((error) => {
+      const field = (error.loc || []).find((part) => !['body', 'query', 'path'].includes(part));
+      return `${labels[field] || field || 'Request'}: ${error.msg || 'Invalid value'}`;
+    });
+    if (errors.length) return errors.join('\n');
+  }
+  return 'Invalid request. Please check your input.';
+}
 async function api(path, options = {}) {
   const response = await fetch(path, options);
   const body = await response.json();
-  if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Invalid request. Please check your input.');
+  if (!response.ok) throw new Error(apiErrorMessage(body.detail));
   return body;
 }
 function jsonRequest(method, body) {
